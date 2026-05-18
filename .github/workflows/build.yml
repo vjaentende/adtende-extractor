@@ -44,10 +44,10 @@ jobs:
           import os
           username = os.environ["ADTENDE_USERNAME"]
           password = os.environ["ADTENDE_PASSWORD"]
-          with open("_baked_creds.py", "w") as f:
+          with open("_baked_creds.py", "w", encoding="utf-8") as f:
               f.write(f"BAKED_USERNAME = {repr(username)}\n")
               f.write(f"BAKED_PASSWORD = {repr(password)}\n")
-          print("✅ _baked_creds.py creat")
+          print("OK: _baked_creds.py creat")
 
       - name: Compilar executable
         run: |
