@@ -1,0 +1,14 @@
+# Credencials — mai al repo
+.env
+_baked_creds.py
+
+# Arxius generats
+*.pdf
+*.xlsx
+*.csv
+dist/
+build/
+*.spec
+__pycache__/
+*.pyc
+.DS_Store
