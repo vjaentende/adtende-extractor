@@ -50,15 +50,7 @@ jobs:
           print("OK: _baked_creds.py creat")
 
       - name: Compilar executable
-        run: |
-          pyinstaller \
-            --onefile \
-            --name sacar_datos \
-            --hidden-import=dotenv \
-            --hidden-import=pandas \
-            --hidden-import=requests \
-            --hidden-import=openpyxl \
-            sacar_datos.py
+        run: pyinstaller --onefile --name sacar_datos --hidden-import=dotenv --hidden-import=pandas --hidden-import=requests --hidden-import=openpyxl sacar_datos.py
 
       - name: Pujar artefacte
         uses: actions/upload-artifact@v4
