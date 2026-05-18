@@ -1,20 +1,28 @@
 import os
 from dotenv import load_dotenv
 
-# En builds compilats (PyInstaller), les credencials van embegudes via _baked_creds.py
-# que es genera en CI i mai es commiteja al repo.
+# 1. Credencials embegudes (builds PyInstaller via CI)
 try:
     from _baked_creds import BAKED_USERNAME, BAKED_PASSWORD
 except ImportError:
     BAKED_USERNAME = BAKED_PASSWORD = None
 
+# 2. Streamlit Secrets (quan s'executa a Streamlit Cloud)
+try:
+    import streamlit as st
+    STREAMLIT_USERNAME = st.secrets.get("ADTENDE_USERNAME")
+    STREAMLIT_PASSWORD = st.secrets.get("ADTENDE_PASSWORD")
+except Exception:
+    STREAMLIT_USERNAME = STREAMLIT_PASSWORD = None
+
+# 3. Fitxer .env (execució local)
 load_dotenv()
 
 BASE_URL = "https://intelek-api-pro-app.prenomics.com"
 LOGIN_URL = f"{BASE_URL}/rest-auth/login/"
 
-USERNAME = BAKED_USERNAME or os.getenv("ADTENDE_USERNAME")
-PASSWORD = BAKED_PASSWORD or os.getenv("ADTENDE_PASSWORD")
+USERNAME = BAKED_USERNAME or STREAMLIT_USERNAME or os.getenv("ADTENDE_USERNAME")
+PASSWORD = BAKED_PASSWORD or STREAMLIT_PASSWORD or os.getenv("ADTENDE_PASSWORD")
 
 ENDPOINTS = {
     "tickets_enriquits": "70c7001b-ba8a-413c-b5e8-4724e6d803bb",
