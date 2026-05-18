@@ -1,6 +1,7 @@
 # Credencials — mai al repo
 .env
 _baked_creds.py
+.streamlit/secrets.toml
 
 # Arxius generats
 *.pdf
