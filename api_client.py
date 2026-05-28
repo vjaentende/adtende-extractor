@@ -1,5 +1,6 @@
 import io
 import json
+import time
 import requests
 import pandas as pd
 
@@ -59,12 +60,19 @@ class AdtendeClient:
             query_body["aggregations"] = aggregations
 
         body = {"queries": [query_body]}
-        resp = self.session.post(
-            url,
-            headers=self._headers(),
-            data=json.dumps(body).encode("utf-8"),
-        )
-        resp.raise_for_status()
+        for attempt in range(4):
+            resp = self.session.post(
+                url,
+                headers=self._headers(),
+                data=json.dumps(body).encode("utf-8"),
+            )
+            if resp.status_code in (502, 503, 504) and attempt < 3:
+                wait = 8 * (attempt + 1)
+                print(f"      ↻ API {resp.status_code} — reintent {attempt+1}/3 en {wait}s...")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            break
         df = pd.read_csv(io.StringIO(resp.text), sep="\x1e")
         # La API retorna columnes amb prefix "anon_1_" — el treiem
         df.columns = [c.split("anon_1_", 1)[-1] if "anon_1_" in c else c for c in df.columns]
@@ -73,9 +81,11 @@ class AdtendeClient:
         # Convertim columnes numèriques que hagin quedat com object
         for col in df.columns:
             if df[col].dtype == object:
-                converted = pd.to_numeric(df[col], errors="ignore")
-                if converted.dtype != object:
+                try:
+                    converted = pd.to_numeric(df[col], errors="raise")
                     df[col] = converted
+                except (ValueError, TypeError):
+                    pass
         return df
 
     # Records above this threshold trigger a confirmation prompt before downloading

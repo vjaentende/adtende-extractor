@@ -1,15 +1,30 @@
-# Credencials — mai al repo
+# Credencials — MAI pujar al repo
 .env
 _baked_creds.py
-.streamlit/secrets.toml
 
-# Arxius generats
+# Entorn virtual
+venv/
+.venv/
+env/
+
+# Informes generats
+*.docx
 *.pdf
 *.xlsx
-*.csv
+*.html
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
 dist/
 build/
-*.spec
-__pycache__/
-*.pyc
+dist_release/
+
+# macOS
 .DS_Store
+
+# IDE
+.cursor/
+.vscode/
+*.swp
