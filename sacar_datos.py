@@ -107,16 +107,42 @@ def calcular_indicadors(df: pd.DataFrame, es_general: bool = False) -> list[dict
     if total == 0:
         return []
 
-    # Satisfacció (només enquestable + rating no nul) — forcem numèric
+    # Satisfacció — forcem numèric
     for col in ["val_rating", "val_pregunta1", "val_pregunta2", "val_pregunta3", "val_encuestable"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-    enc   = df[(df["val_encuestable"] == 1) & (df["val_rating"].notna())]
-    n_enc = len(enc)
-    sat   = f"{enc['val_rating'].mean():.2f}"    if n_enc > 0 else "N/D"
-    p1    = f"{enc['val_pregunta1'].mean():.2f}" if n_enc > 0 else "N/D"
-    p2    = f"{enc['val_pregunta2'].mean():.2f}" if n_enc > 0 else "N/D"
-    p3    = f"{enc['val_pregunta3'].mean():.2f}" if n_enc > 0 else "N/D"
+
+    def _safe_mean(series):
+        m = series.mean()
+        return f"{m:.2f}" if pd.notna(m) else "N/D"
+
+    # Tots els encuestables
+    enc_base = df[df["val_encuestable"] == 1]
+    n_enc    = len(enc_base)
+
+    # Subpreguntes individuals (val_encuestable==1 + col no nul·la)
+    def _mean_sub(col):
+        sub = enc_base[enc_base[col].notna()] if col in enc_base.columns else pd.DataFrame()
+        return _safe_mean(sub[col]) if len(sub) > 0 else "N/D"
+    p1 = _mean_sub("val_pregunta1")
+    p2 = _mean_sub("val_pregunta2")
+    p3 = _mean_sub("val_pregunta3")
+
+    # Grau de satisfacció global: usar val_media_enc (pre-calculat a la BD, = (p1+p2+p3)/3)
+    if "val_media_enc" in enc_base.columns:
+        enc_base_m = enc_base.copy()
+        enc_base_m["val_media_enc"] = pd.to_numeric(enc_base_m["val_media_enc"], errors="coerce")
+        enc_with_enc = enc_base_m[enc_base_m["val_media_enc"].notna()]
+        sat = f"{enc_with_enc['val_media_enc'].mean():.2f}" if len(enc_with_enc) > 0 else "N/D"
+    else:
+        # Fallback: mean(p1, p2, p3) si val_media_enc no disponible
+        preg_vals = []
+        for pq in ["val_pregunta1", "val_pregunta2", "val_pregunta3"]:
+            if pq in enc_base.columns:
+                m = enc_base[pq].mean()
+                if pd.notna(m):
+                    preg_vals.append(m)
+        sat = f"{sum(preg_vals) / len(preg_vals):.2f}" if preg_vals else "N/D"
 
     # Temps mig (val_time_spent és en MINUTS) — forcem numèric
     df["val_time_spent"] = pd.to_numeric(df["val_time_spent"], errors="coerce")
@@ -172,7 +198,7 @@ def calcular_indicadors(df: pd.DataFrame, es_general: bool = False) -> list[dict
         {"#": "—",  "Indicador": "Total assistències",          "Valor": total,     "Pct": ""},
         {"#": "",   "Indicador": "Població (ref.)",              "Valor": pop_str,   "Pct": ""},
         {"#": "1",  "Indicador": "% Població atesa",             "Valor": pct_pop,   "Pct": ""},
-        {"#": "2",  "Indicador": "Grau de satisfacció /5",       "Valor": sat,       "Pct": f"n={n_enc}"},
+        {"#": "2",  "Indicador": "Grau de satisfacció /5",       "Valor": sat,       "Pct": ""},
         {"#": "2.1","Indicador": "  Com valora la qualitat?",    "Valor": p1,        "Pct": ""},
         {"#": "2.1","Indicador": "  Li han resolt la consulta?", "Valor": p2,        "Pct": ""},
         {"#": "2.1","Indicador": "  Com valora el tracte?",      "Valor": p3,        "Pct": ""},
@@ -363,6 +389,465 @@ def _estil_indicadors(ws, municipio: str, d_from: date, d_to: date):
         ws.row_dimensions[row_idx].height = 18
 
     ws.freeze_panes = "A2"
+
+
+# ─── Multi-període: diverses columnes ────────────────────────────────────────
+
+def exportar_excel_multi_periode(municipio: str,
+                                  periodes: list[tuple[date, date]],
+                                  ind_per_periode: list[tuple[list, list]]) -> str:
+    """
+    Genera un Excel amb una columna per cada període.
+    ind_per_periode = [(ind_ajunt, ind_general), ...] — un element per període.
+    """
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    safe_name = municipio.replace(" ", "_").replace("/", "-")
+    filename  = f"informe_client_{safe_name}_multiperiode.xlsx"
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Indicadors"
+
+    # ── Colors ───────────────────────────────────────────────────────────────
+    COLOR_HEADER   = "1B3A6B"
+    WHITE          = "FFFFFF"
+    GREEN          = "1A7A1A"
+    RED            = "C0392B"
+    GREEN_BG       = "E8F5E9"
+    RED_BG         = "FFEBEE"
+    FILA_ALT       = "F2F8FF"
+    SUBIND_BG      = "F7F7F7"
+    PERIOD_COLORS  = ["00B4A6", "2E86AB", "A23B72", "F18F01"]  # un color per període
+
+    thin   = Side(style="thin", color="CCCCCC")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    # ── Capçaleres: fila 1 = Indicador | Període 1 | Període 2 | ...  ─────────
+    labels_periode = [
+        f"{d_from.strftime('%d/%m/%y')}–{d_to.strftime('%d/%m/%y')}"
+        for d_from, d_to in periodes
+    ]
+
+    # Col 1 = #, Col 2 = Indicador, després una col per període
+    n_periods = len(periodes)
+    ws.cell(row=1, column=1, value="#")
+    ws.cell(row=1, column=2, value="Indicador")
+    for pi, lbl in enumerate(labels_periode):
+        ws.cell(row=1, column=3 + pi, value=lbl)
+
+    # Estil capçalera
+    ws.column_dimensions["A"].width = 5
+    ws.column_dimensions["B"].width = 36
+    for pi in range(n_periods):
+        ws.column_dimensions[get_column_letter(3 + pi)].width = 20
+
+    for col in range(1, 3 + n_periods):
+        cell = ws.cell(row=1, column=col)
+        color = PERIOD_COLORS[(col - 3) % len(PERIOD_COLORS)] if col >= 3 else COLOR_HEADER
+        cell.font      = Font(bold=True, color=WHITE, size=10)
+        cell.fill      = PatternFill("solid", fgColor=color)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border    = border
+    ws.row_dimensions[1].height = 35
+
+    # ── Files de dades ────────────────────────────────────────────────────────
+    # Obtenim la llista d'indicadors del primer període com a referència
+    ind_base = ind_per_periode[0][0]
+
+    for ri, row_ind in enumerate(ind_base):
+        row_idx  = ri + 2
+        num_val  = row_ind["#"]
+        ind_name = row_ind["Indicador"]
+        is_sub   = str(num_val) == "2.1"
+        is_total = str(num_val) == "—"
+        is_alt   = (row_idx % 2 == 0)
+
+        ws.cell(row=row_idx, column=1, value=num_val)
+        ws.cell(row=row_idx, column=2, value=ind_name)
+
+        for pi, (ind_ajunt, ind_general) in enumerate(ind_per_periode):
+            col_idx = 3 + pi
+            # Troba el valor per aquest indicador en aquest període
+            ajunt_row = next((r for r in ind_ajunt   if r["Indicador"] == ind_name), {})
+            gen_row   = next((r for r in ind_general if r["Indicador"] == ind_name), {})
+
+            val_ajunt = ajunt_row.get("Valor", "N/D")
+            pct_ajunt = ajunt_row.get("Pct", "")
+            display   = f"{val_ajunt} {pct_ajunt}".strip() if pct_ajunt else str(val_ajunt)
+
+            cell = ws.cell(row=row_idx, column=col_idx, value=display)
+
+            # Color verd/vermell vs General
+            num_a = _parse_numeric(val_ajunt)
+            num_g = _parse_numeric(gen_row.get("Valor"))
+            invertit = ind_name.strip() in INDICADORS_INVERTITS
+
+            color_text = None
+            color_bg   = None
+            if num_a is not None and num_g is not None and not is_total and not is_sub:
+                if num_a > num_g:
+                    color_text = RED   if invertit else GREEN
+                    color_bg   = RED_BG if invertit else GREEN_BG
+                elif num_a < num_g:
+                    color_text = GREEN if invertit else RED
+                    color_bg   = GREEN_BG if invertit else RED_BG
+
+            bg_default = SUBIND_BG if is_sub else (FILA_ALT if is_alt else WHITE)
+            cell.fill      = PatternFill("solid", fgColor=color_bg or bg_default)
+            cell.font      = Font(
+                bold=is_total, italic=is_sub,
+                size=9 if is_sub else 10,
+                color=color_text or ("000000" if not is_sub else "666666")
+            )
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border    = border
+
+        # Estil cols fixes (# i Indicador)
+        bg_default = SUBIND_BG if is_sub else (FILA_ALT if is_alt else WHITE)
+        for col in (1, 2):
+            cell = ws.cell(row=row_idx, column=col)
+            cell.fill      = PatternFill("solid", fgColor=bg_default)
+            cell.font      = Font(
+                bold=is_total, italic=is_sub,
+                size=9 if is_sub else 10,
+                color="000000" if not is_sub else "666666"
+            )
+            cell.alignment = Alignment(
+                horizontal="left" if col == 2 else "center",
+                vertical="center",
+                indent=1 if col == 2 and is_sub else 0
+            )
+            cell.border    = border
+        ws.row_dimensions[row_idx].height = 18
+
+    ws.freeze_panes = "C2"
+    wb.save(filename)
+    return filename
+
+
+def generar_html_multi_periode(municipio: str,
+                               periodes: list[tuple[date, date]],
+                               ind_per_periode: list[tuple[list, list]]) -> str:
+    """
+    Genera la taula HTML idèntica a la versió de dos columnes,
+    però amb una parella (Ajuntament | General) per cada període.
+    """
+    INDICADORS_INVERTITS_SET = {
+        "Temps mig consulta",
+        "Assistències Catàleg tràmits",
+        "Assistències Cita prèvia",
+        "Trucades per centraleta",
+    }
+
+    labels = [
+        f"{d_from.strftime('%d/%m/%y')}–{d_to.strftime('%d/%m/%y')}"
+        for d_from, d_to in periodes
+    ]
+    n = len(periodes)
+    col_w_ind = 220
+    col_w_val = 110
+
+    # Capçalera de grups (una per període)
+    group_headers = ""
+    for lbl in labels:
+        group_headers += f"""
+        <th colspan="2" class="period-header">{lbl}</th>"""
+
+    # SubCapçalera (Ajuntament | General per cada període)
+    sub_headers = ""
+    for _ in labels:
+        sub_headers += f"""
+        <th class="col-ajunt">{municipio.title()}</th>
+        <th class="col-general">Ràtio General</th>"""
+
+    # Files
+    ind_base = ind_per_periode[0][0]
+    rows_html = ""
+    for row_ind in ind_base:
+        ind_name = row_ind["Indicador"]
+        is_sub   = str(row_ind["#"]) == "2.1"
+        is_total = str(row_ind["#"]) == "—"
+        row_class = "row-sub" if is_sub else ("row-total" if is_total else "")
+
+        cells = ""
+        for pi, (ind_ajunt, ind_general) in enumerate(ind_per_periode):
+            ajunt_row = next((r for r in ind_ajunt   if r["Indicador"] == ind_name), {})
+            gen_row   = next((r for r in ind_general if r["Indicador"] == ind_name), {})
+
+            val_a = ajunt_row.get("Valor", "N/D")
+            pct_a = ajunt_row.get("Pct",   "")
+            val_g = gen_row.get("Valor",   "N/D")
+
+            pct_g = gen_row.get("Pct", "")
+            display_a = f"{val_a} <span class='pct'>{pct_a}</span>" if pct_a else str(val_a)
+            display_g = f"{val_g} <span class='pct'>{pct_g}</span>" if pct_g else str(val_g)
+
+            # Color
+            num_a = _parse_numeric(val_a)
+            num_g = _parse_numeric(val_g)
+            invertit = ind_name.strip() in INDICADORS_INVERTITS_SET
+            css_class = ""
+            if num_a is not None and num_g is not None and not is_total and not is_sub:
+                if num_a > num_g:
+                    css_class = "worse" if invertit else "better"
+                elif num_a < num_g:
+                    css_class = "better" if invertit else "worse"
+
+            sep = ' style="border-left: 2px solid #bbb;"' if pi > 0 else ""
+            cells += f'<td class="val {css_class}"{sep}>{display_a}</td>'
+            cells += f'<td class="val general">{display_g}</td>'
+
+        rows_html += f"""
+        <tr class="{row_class}">
+          <td class="ind">{ind_name}</td>
+          {cells}
+        </tr>"""
+
+    total_width = col_w_ind + n * col_w_val * 2 + 40
+    table_width = f"{total_width}px"
+
+    html = f"""<!DOCTYPE html>
+<html lang="ca">
+<head>
+<meta charset="UTF-8">
+<title>Dades analítiques — {municipio.title()}</title>
+<style>
+  body {{
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: #f5f5f5;
+    display: flex;
+    justify-content: center;
+    padding: 40px 20px;
+  }}
+  .wrap {{
+    background: white;
+    padding: 28px 32px;
+    max-width: {table_width};
+    width: 100%;
+  }}
+  .title {{
+    font-size: 11px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    font-variant: small-caps;
+    color: #00A89D;
+    margin-bottom: 4px;
+  }}
+  .subtitle {{
+    font-size: 13px;
+    color: #555;
+    margin-bottom: 18px;
+  }}
+  table {{
+    width: 100%;
+    border-collapse: collapse;
+  }}
+  th {{
+    font-size: 11px;
+    font-weight: 600;
+    padding: 7px 10px;
+    text-align: center;
+    border-bottom: 2px solid #ccc;
+    color: #444;
+    background: #f9f9f9;
+  }}
+  th.period-header {{
+    font-size: 11px;
+    color: #333;
+    background: #f0f0f0;
+    border-bottom: 1px solid #ddd;
+    border-left: 2px solid #bbb;
+    padding: 5px 10px;
+  }}
+  th.period-header:first-of-type {{
+    border-left: none;
+  }}
+  th.col-ajunt {{
+    color: #00A89D;
+    background: #f9f9f9;
+    border-left: 2px solid #bbb;
+    min-width: {col_w_val}px;
+  }}
+  th.col-general {{
+    color: #777;
+    background: #f9f9f9;
+    min-width: {col_w_val}px;
+  }}
+  td.ind {{
+    font-size: 12px;
+    color: #333;
+    padding: 7px 10px;
+    border-bottom: 1px solid #eee;
+    min-width: {col_w_ind}px;
+  }}
+  td.val {{
+    font-size: 12px;
+    font-weight: 700;
+    text-align: center;
+    padding: 7px 10px;
+    border-bottom: 1px solid #eee;
+  }}
+  td.general {{
+    color: #888;
+    font-weight: 400;
+  }}
+  .better {{ color: #00A89D; }}
+  .worse  {{ color: #D9534F; }}
+  .pct    {{ font-size: 10px; font-weight: 400; color: #999; }}
+  tr.row-sub td {{ font-size: 11px; color: #777; font-weight: 400; }}
+  tr.row-sub td.val {{ font-weight: 400; }}
+  tr.row-total td {{ font-weight: 700; border-top: 2px solid #ddd; }}
+  tr:hover td {{ background: #fafafa; }}
+  .download {{
+    margin-top: 16px;
+    text-align: right;
+  }}
+  .download a {{
+    font-size: 11px;
+    color: #00A89D;
+    text-decoration: none;
+    border: 1px solid #00A89D;
+    padding: 4px 10px;
+    border-radius: 3px;
+  }}
+  .download a:hover {{ background: #00A89D; color: white; }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="title">Dades analítiques principals</div>
+  <div class="subtitle">{municipio.title()} — comparativa anual</div>
+  <table>
+    <thead>
+      <tr>
+        <th rowspan="2" style="text-align:left; min-width:{col_w_ind}px;">Indicador</th>
+        {group_headers}
+      </tr>
+      <tr>
+        {sub_headers}
+      </tr>
+    </thead>
+    <tbody>
+      {rows_html}
+    </tbody>
+  </table>
+</div>
+</body>
+</html>"""
+    return html
+
+
+def servir_html(html: str, port: int = 8765):
+    """Escriu l'HTML a /tmp i el serveix a localhost."""
+    import os, threading, http.server
+    os.makedirs("/tmp/informe-taula", exist_ok=True)
+    with open("/tmp/informe-taula/index.html", "w", encoding="utf-8") as f:
+        f.write(html)
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, directory="/tmp/informe-taula", **kw)
+        def log_message(self, *_): pass
+
+    def run():
+        with http.server.HTTPServer(("", port), Handler) as srv:
+            srv.serve_forever()
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    print(f"  🌐 Taula disponible a: http://localhost:{port}")
+    import webbrowser
+    webbrowser.open(f"http://localhost:{port}")
+
+
+def download_full_cache(client: AdtendeClient, d_from: date, d_to: date,
+                        municipio: str = None) -> pd.DataFrame:
+    """
+    Descarrega tots els mesos del rang d'una sola vegada (sense filtre de dates).
+    Retorna el DataFrame complet sense aplicar filtre de rang — es farà client-side per cada període.
+    """
+    mesos = months_in_range(d_from, d_to)
+    dfs = []
+    label = municipio if municipio else "GENERAL"
+    total_mesos = len(mesos)
+
+    for i, (y, m) in enumerate(mesos):
+        m_from, m_to = month_window(y, m)
+        filters = [{"type": "date", "variable": "td_managed",
+                    "values": {"gte": m_from, "lt": m_to}}]
+        try:
+            df_m = client.query("tickets_enriquits", filters=filters)
+            if municipio:
+                sub = df_m[
+                    (df_m["des_client"]  == municipio) &
+                    (df_m["des_project"] == "OAC 360º")
+                ].copy()
+            else:
+                sub = df_m[df_m["des_project"] == "OAC 360º"].copy()
+            dfs.append(sub)
+            print(f"  [{label}] {y}-{m:02d} ({i+1}/{total_mesos}) → {len(sub):>5} tickets")
+        except Exception as e:
+            print(f"  [{label}] {y}-{m:02d} → ERROR: {e}")
+
+    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+
+def filter_period(df_cache: pd.DataFrame, d_from: date, d_to: date) -> pd.DataFrame:
+    """Aplica el filtre doble (td_managed + td_created) sobre el cache ja descarregat."""
+    s_from = str(d_from)
+    s_to   = str(d_to + timedelta(days=1))
+    return df_cache[
+        (df_cache["td_managed"] >= s_from) & (df_cache["td_managed"] < s_to) &
+        (df_cache["td_created"] >= s_from) & (df_cache["td_created"] < s_to)
+    ].copy().reset_index(drop=True)
+
+
+def generate_multi_period_report(municipio: str, periodes: list[tuple[date, date]]):
+    """
+    Genera l'informe de client per a múltiples períodes.
+    Descarrega UNA SOLA VEGADA tot el rang global i filtra client-side.
+    """
+    client = AdtendeClient()
+    print("Autenticant...")
+    client.login()
+
+    # Rang global: del mínim al màxim de tots els períodes
+    global_from = min(d for d, _ in periodes)
+    global_to   = max(d for _, d in periodes)
+
+    print(f"\n  Rang global: {global_from.strftime('%d/%m/%Y')} → {global_to.strftime('%d/%m/%Y')}")
+    mesos_total = len(months_in_range(global_from, global_to))
+    print(f"  Descarregant {mesos_total} mesos per {municipio} (1 descàrrega)...")
+    df_ajunt_cache = download_full_cache(client, global_from, global_to, municipio=municipio)
+
+    print(f"\n  Descarregant {mesos_total} mesos GENERAL (1 descàrrega)...")
+    df_general_cache = download_full_cache(client, global_from, global_to, municipio=None)
+
+    # Calcula indicadors per cada període filtrant el cache
+    print(f"\n  Calculant indicadors per cada període...")
+    ind_per_periode = []
+    for d_from, d_to in periodes:
+        df_a = filter_period(df_ajunt_cache,   d_from, d_to)
+        df_g = filter_period(df_general_cache, d_from, d_to)
+        ind_a = calcular_indicadors(df_a, es_general=False)
+        ind_g = calcular_indicadors(df_g, es_general=True)
+        ind_per_periode.append((ind_a, ind_g))
+        lbl = f"{d_from.strftime('%d/%m/%y')}–{d_to.strftime('%d/%m/%y')}"
+        print(f"    {lbl}: {len(df_a)} tickets {municipio} | {len(df_g)} tickets GENERAL")
+
+    print(f"\n{'─'*60}")
+    print("  Generant Excel...")
+    filename = exportar_excel_multi_periode(municipio, periodes, ind_per_periode)
+    print(f"  ✅ Excel: {filename}")
+
+    print("  Generant taula HTML...")
+    html = generar_html_multi_periode(municipio, periodes, ind_per_periode)
+    servir_html(html)
+
+    return filename
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
