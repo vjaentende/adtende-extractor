@@ -5,16 +5,20 @@ Genera l'informe individual d'un agent comparant:
   - Trucades reals (API Adtende, endpoint tickets_enriquits)
   - Mínim exigible calculat a partir de la jornada real (Bizneo API)
 
+Fórmula (extreta del full "MINIM EXIGIBLE" de l'Excel RRHH):
+    mínim_mensual = 54.4 × (hores_contracte/39) × dies_treballats_mes
+    On: 54.4 = (34h_actives/5_dies) × 8_trucades/hora_activa
+
 Ús:
-    python agent_report.py --agent PV --mes 2026-05
-    python agent_report.py --agent SG --mes 2026-04
+    python agent_report.py --agent PV --mes 2026-05 --trucades 423
+    python agent_report.py --agent SG --mes 2026-04 --trucades 312
 
 Agents disponibles:
     SG  → Susanna   (Operador 1)
     SB  → Sergio    (Operador 2)
     SGV → Sandra    (Operador 4)
     DC  → David     (Operador 5)
-    GH  → Guillem   (Operador 5/6)
+    GH  → Guillem   (Operador 6)
     AM  → Arnau     (Operador 7)
     AS  → Aitana    (Operador 8)
     PV  → Pau       (Agent 1)
@@ -23,319 +27,235 @@ Agents disponibles:
 """
 
 import argparse
-from datetime import date, timedelta
 import calendar
-import pandas as pd
+from datetime import date, timedelta
+from functools import lru_cache
+
+# ─── Configuració Bizneo ──────────────────────────────────────────────────────
+
+BIZNEO_BASE  = "https://adtende.bizneohr.com/api/v1"
+BIZNEO_TOKEN = "SFMyNTY.g2gDdAAAAAJ3AmlkbQAAACQwZGIyZDM5Ni0yZDg2LTQzNWMtOGMwYi1kMGMwNDZmZTBhYmR3CmNvbXBhbnlfaWRiAO2q5G4GAM4t3oeeAWIAAVGA.bB27l1ee8EVFEe8jTLCGYWDQsraP2L81ANlwlRqn0wQ"
 
 # ─── Configuració agents ──────────────────────────────────────────────────────
+#
+# hores_setmana: hores de contracte setmanals (39h estàndard, 25h ANA JAÉN)
+# bizneo_id:     ID de l'usuari a Bizneo HCM (None si no s'ha trobat)
 
 AGENTS = {
-    "SG":  {"nom": "Susanna",  "rol": "Operador 1", "bizneo_id": None},
-    "SB":  {"nom": "Sergio",   "rol": "Operador 2", "bizneo_id": None},
-    "SGV": {"nom": "Sandra",   "rol": "Operador 4", "bizneo_id": None},
-    "DC":  {"nom": "David",    "rol": "Operador 5", "bizneo_id": None},
-    "GH":  {"nom": "Guillem",  "rol": "Operador 6", "bizneo_id": None},
-    "AM":  {"nom": "Arnau",    "rol": "Operador 7", "bizneo_id": None},
-    "AS":  {"nom": "Aitana",   "rol": "Operador 8", "bizneo_id": None},
-    "PV":  {"nom": "Pau",      "rol": "Agent 1",    "bizneo_id": None},
-    "LMK": {"nom": "Laura",    "rol": "Agent 2",    "bizneo_id": None},
-    "BC":  {"nom": "Belén",    "rol": "Agent 3",    "bizneo_id": None},
+    "SG":  {"nom": "Susanna",  "rol": "Operador 1", "hores_setmana": 39, "bizneo_id": None},
+    "SB":  {"nom": "Sergio",   "rol": "Operador 2", "hores_setmana": 39, "bizneo_id": 15800447},
+    "SGV": {"nom": "Sandra",   "rol": "Operador 4", "hores_setmana": 39, "bizneo_id": 15800443},
+    "DC":  {"nom": "David",    "rol": "Operador 5", "hores_setmana": 39, "bizneo_id": None},
+    "GH":  {"nom": "Guillem",  "rol": "Operador 6", "hores_setmana": 39, "bizneo_id": None},
+    "AM":  {"nom": "Arnau",    "rol": "Operador 7", "hores_setmana": 39, "bizneo_id": None},
+    "AS":  {"nom": "Aitana",   "rol": "Operador 8", "hores_setmana": 39, "bizneo_id": 15800441},
+    "PV":  {"nom": "Pau",      "rol": "Agent 1",    "hores_setmana": 39, "bizneo_id": 15800448},
+    "LMK": {"nom": "Laura",    "rol": "Agent 2",    "hores_setmana": 39, "bizneo_id": 15800449},
+    "BC":  {"nom": "Belén",    "rol": "Agent 3",    "hores_setmana": 39, "bizneo_id": None},
 }
 
-# ─── Lògica de mínim exigible (extreta del full "MINIM EXIGIBLE") ─────────────
-#
-# Font: ESTADIS CALCUL MIN EXIGIBLES RRHH 23042026.xlsx → full "MINIM EXIGIBLE"
-#
-# Paràmetres base:
-#   - Durada mitja trucada          : 4.5 min (3.6 cita prèvia / 6.5 tràmits)
-#   - Jornada setmanal complerta    : 39 h
-#   - Descans per dia treballat     : 1 h (5 h/setmana)
-#   - Hores actives setmana complerta: 34 h (39 - 5)
-#   - Hores actives mes complert    : 136 h (34 × 4 setmanes)
-#   - Mínim exigible/hora activa    : 8 trucades
-#   - Mínim exigible jornada complerta/mes: 1.088 trucades (136 × 8)
-#
-# Fórmula per a qualsevol agent:
-#   mínim_mensual = hores_actives_reals × 8
-#
-#   On: hores_actives_reals = hores_treballades - (dies_treballats × 1h_descans)
-#
-# Proporcionalitat:
-#   Si l'agent treballa menys hores (parcial, absències, vacances),
-#   el mínim baixa exactament proporcional a les hores actives.
+# ─── Paràmetres del mínim exigible (font: MINIM EXIGIBLE sheet) ───────────────
 
-MINIM_TRUCADES_PER_HORA_ACTIVA = 8       # trucades/hora activa (mínim exigible)
-DESCANS_PER_DIA_HORES          = 1.0    # 1h descans per cada dia treballat
-HORES_JORNADA_COMPLERTA        = 39.0   # hores/setmana jornada complerta
-SETMANES_MES                   = 4.0    # setmanes/mes (aprox.)
+MINIM_TRUCADES_HORA          = 8      # trucades/hora activa — KPI central
+HORES_SETMANA_ESTANDARD      = 39.0   # jornada complerta referència
+DESCANS_HORES_DIA            = 1.0    # 1h descans per dia (jornades > 30h/setmana)
+HORES_ACTIVES_SETMANA_STD    = 34.0   # 39h - 5 dies × 1h = 34h actives
+# trucades/dia jornada complerta = (34h/5dies) × 8 trucades/hora = 54.4
+TRUCADES_DIA_JORNADA_COMPLERTA = (HORES_ACTIVES_SETMANA_STD / 5) * MINIM_TRUCADES_HORA
 
 
-def calcular_hores_actives(hores_treballades: float, dies_treballats: int) -> float:
+def dies_laborables_mes(any_: int, mes: int) -> list[date]:
+    """Retorna tots els dies laborables (Dl–Dv) d'un mes."""
+    _, num_dies = calendar.monthrange(any_, mes)
+    return [
+        date(any_, mes, d)
+        for d in range(1, num_dies + 1)
+        if date(any_, mes, d).weekday() < 5
+    ]
+
+
+def calcular_minim(hores_setmana: float, dies_treballats: int) -> dict:
     """
-    Retorna les hores actives (sense descansos) d'un agent.
-    hores_treballades: total hores de jornada del mes
-    dies_treballats:   dies laborables efectivament treballats (sense absències)
-    """
-    descans_total = dies_treballats * DESCANS_PER_DIA_HORES
-    return max(0.0, hores_treballades - descans_total)
+    Calcula el mínim exigible per a un agent donades les seves hores de
+    contracte i els dies efectivament treballats al mes.
 
-
-def calcular_minim_exigible(hores_actives: float) -> float:
+    Fórmula exacta de l'Excel (full MINIM EXIGIBLE, cel·la C30/D30):
+        trucades_dia  = 54.4 × (hores_setmana / 39)
+        minim_mensual = trucades_dia × dies_treballats
     """
-    Mínim de trucades exigible per a un agent amb les hores actives donades.
-    """
-    return hores_actives * MINIM_TRUCADES_PER_HORA_ACTIVA
+    trucades_dia = TRUCADES_DIA_JORNADA_COMPLERTA * (hores_setmana / HORES_SETMANA_ESTANDARD)
+    minim        = trucades_dia * dies_treballats
 
-
-def calcular_minim_proporcional(hores_treballades: float, dies_treballats: int) -> dict:
-    """
-    Retorna un dict amb tots els valors del mínim exigible per a un agent.
-    """
-    hores_actives = calcular_hores_actives(hores_treballades, dies_treballats)
-    minim         = calcular_minim_exigible(hores_actives)
-
-    # Referència jornada complerta
-    dies_ref       = int(SETMANES_MES * 5)           # 20 dies laborables
-    hores_ref      = HORES_JORNADA_COMPLERTA * SETMANES_MES  # 156h brutes
-    hores_act_ref  = calcular_hores_actives(hores_ref, dies_ref)  # 136h
-    minim_ref      = calcular_minim_exigible(hores_act_ref)       # 1088
+    # Referència jornada complerta (20 dies, 39h)
+    dies_ref  = 20
+    minim_ref = TRUCADES_DIA_JORNADA_COMPLERTA * dies_ref  # 1.088
 
     return {
-        "hores_jornada":    hores_treballades,
+        "hores_setmana":    hores_setmana,
         "dies_treballats":  dies_treballats,
-        "hores_actives":    round(hores_actives, 2),
+        "trucades_dia":     round(trucades_dia, 1),
         "minim_exigible":   round(minim),
         "minim_ref_complet": round(minim_ref),
-        "pct_jornada":      round(hores_actives / hores_act_ref * 100, 1) if hores_act_ref > 0 else 0,
+        "pct_jornada":      round(dies_treballats / dies_ref * 100, 1),
     }
 
 
-# ─── Horaris per setmana (extrets del full "HORARI SETMANA X") ───────────────
+# ─── Client Bizneo HCM ────────────────────────────────────────────────────────
 #
-# Cada agent té hores per dia per cada tipus de setmana.
-# Clau: (codi_agent, num_setmana) → {dia: hores}
-# Setmanes: 1, 2, 3, 4 (dins del mes)
-# Dies: L=Dilluns, M=Dimarts, X=Dimecres, J=Dijous, V=Divendres
-#
-# Font: fulls "HORARI SETMANA 1", "HORARI SETMANA 2 I 4", "HORARI SETMANA 3"
-#       i fulls individuals per agent (SG, SB, SGV, DC, GH, AM, AS, PV, LMK, BC)
-
-HORARI_AGENTS = {
-    # SG - Susanna — jornada 39h/setmana, horari fix
-    ("SG", 1): {"L": 7, "M": 7, "X": 7, "J": 7, "V": 7},
-    ("SG", 2): {"L": 7, "M": 7, "X": 7, "J": 7, "V": 7},
-    ("SG", 3): {"L": 7, "M": 7, "X": 7, "J": 7, "V": 7},
-    ("SG", 4): {"L": 7, "M": 7, "X": 7, "J": 7, "V": 7},
-
-    # SB - Sergio — horari rotatiu, setmana 4 diferent
-    ("SB", 1): {"L": 7,  "M": 7,  "X": 10, "J": 7,  "V": 7},
-    ("SB", 2): {"L": 7,  "M": 7,  "X": 10, "J": 7,  "V": 7},
-    ("SB", 3): {"L": 7,  "M": 7,  "X": 10, "J": 7,  "V": 7},
-    ("SB", 4): {"L": 7,  "M": 7,  "X": 7,  "J": 7,  "V": 10},  # setmana 4 diferent
-
-    # SGV - Sandra
-    ("SGV", 1): {"L": 10, "M": 7,  "X": 10, "J": 6,  "V": 10},
-    ("SGV", 2): {"L": 10, "M": 7,  "X": 10, "J": 6,  "V": 10},
-    ("SGV", 3): {"L": 10, "M": 7,  "X": 10, "J": 6,  "V": 6},
-    ("SGV", 4): {"L": 10, "M": 7,  "X": 10, "J": 6,  "V": 6},
-
-    # DC - David — jornada parcial 26h
-    ("DC", 1): {"L": 10, "M": 9,  "X": 10, "J": 0,  "V": 0},
-    ("DC", 2): {"L": 10, "M": 9,  "X": 10, "J": 0,  "V": 0},
-    ("DC", 3): {"L": 10, "M": 10, "X": 9,  "J": 0,  "V": 0},
-    ("DC", 4): {"L": 10, "M": 10, "X": 9,  "J": 0,  "V": 0},
-
-    # GH - Guillem
-    ("GH", 1): {"L": 10, "M": 10, "X": 6,  "J": 8,  "V": 5},
-    ("GH", 2): {"L": 10, "M": 10, "X": 6,  "J": 8,  "V": 5},
-    ("GH", 3): {"L": 10, "M": 10, "X": 6,  "J": 8,  "V": 5},
-    ("GH", 4): {"L": 10, "M": 10, "X": 6,  "J": 8,  "V": 5},
-
-    # AM - Arnau — setmanes 1/3 vs 2/4
-    ("AM", 1): {"L": 7,  "M": 7,  "X": 7,  "J": 7,  "V": 7},
-    ("AM", 2): {"L": 7,  "M": 9,  "X": 7,  "J": 10, "V": 6},
-    ("AM", 3): {"L": 7,  "M": 6,  "X": 6,  "J": 10, "V": 10},
-    ("AM", 4): {"L": 7,  "M": 9,  "X": 7,  "J": 10, "V": 6},
-
-    # AS - Aitana
-    ("AS", 1): {"L": 7,  "M": 9,  "X": 9,  "J": 7,  "V": 7},
-    ("AS", 2): {"L": 7,  "M": 9,  "X": 9,  "J": 7,  "V": 7},
-    ("AS", 3): {"L": 7,  "M": 9,  "X": 9,  "J": 7,  "V": 7},
-    ("AS", 4): {"L": 7,  "M": 9,  "X": 9,  "J": 7,  "V": 7},
-
-    # PV - Pau — setmanes 1/3/4 vs 2
-    ("PV", 1): {"L": 7,  "M": 8,  "X": 9,  "J": 7,  "V": 8},
-    ("PV", 2): {"L": 7,  "M": 8,  "X": 7,  "J": 7,  "V": 10},
-    ("PV", 3): {"L": 7,  "M": 8,  "X": 9,  "J": 7,  "V": 8},
-    ("PV", 4): {"L": 7,  "M": 8,  "X": 9,  "J": 7,  "V": 8},
-
-    # LMK - Laura
-    ("LMK", 1): {"L": 9,  "M": 7,  "X": 7,  "J": 9,  "V": 7},
-    ("LMK", 2): {"L": 9,  "M": 7,  "X": 7,  "J": 9,  "V": 7},
-    ("LMK", 3): {"L": 9,  "M": 7,  "X": 7,  "J": 9,  "V": 7},
-    ("LMK", 4): {"L": 9,  "M": 7,  "X": 7,  "J": 9,  "V": 7},
-
-    # BC - Belén
-    ("BC", 1): {"L": 7,  "M": 10, "X": 7,  "J": 8,  "V": 7},
-    ("BC", 2): {"L": 7,  "M": 10, "X": 7,  "J": 8,  "V": 7},
-    ("BC", 3): {"L": 7,  "M": 10, "X": 7,  "J": 8,  "V": 7},
-    ("BC", 4): {"L": 7,  "M": 10, "X": 7,  "J": 8,  "V": 7},
-}
-
-DIA_NUM = {0: "L", 1: "M", 2: "X", 3: "J", 4: "V"}  # weekday() → codi dia
-
-
-def num_setmana_del_mes(d: date) -> int:
-    """Retorna el número de setmana dins del mes (1-4) per a una data donada."""
-    primer_dia = d.replace(day=1)
-    # Quina setmana del mes és (1-indexed)
-    return ((d.day - 1) // 7) + 1
-
-
-def hores_mes_per_horari(codi_agent: str, any: int, mes: int,
-                          dies_absencia: list[date] = None) -> dict:
-    """
-    Calcula les hores i dies treballats per a un agent en un mes concret,
-    descomptant els dies d'absència si es proporcionen.
-
-    Retorna: {"hores": float, "dies": int, "detall": [...]}
-    """
-    dies_absencia = dies_absencia or []
-    any_mes = date(any, mes, 1)
-    _, num_dies = calendar.monthrange(any, mes)
-
-    hores_total = 0.0
-    dies_total  = 0
-    detall      = []
-
-    for dia_num in range(1, num_dies + 1):
-        d = date(any, mes, dia_num)
-        if d.weekday() >= 5:   # cap de setmana
-            continue
-        if d in dies_absencia:
-            detall.append({"data": d, "hores": 0, "absencia": True})
-            continue
-
-        num_s  = num_setmana_del_mes(d)
-        num_s  = min(num_s, 4)          # màxim 4
-        codi_d = DIA_NUM[d.weekday()]
-        horari = HORARI_AGENTS.get((codi_agent, num_s), {})
-        hores  = horari.get(codi_d, 0)
-
-        hores_total += hores
-        if hores > 0:
-            dies_total += 1
-        detall.append({"data": d, "hores": hores, "absencia": False})
-
-    return {"hores": hores_total, "dies": dies_total, "detall": detall}
-
-
-# ─── Client Bizneo (pendent de token) ────────────────────────────────────────
+# Comportament observat de l'API (juny 2026):
+#  - GET /absences retorna 100 registres únics (la paginació diu 1221 però repeteix)
+#  - Els filtres user_id/start_date/end_date s'ignoren → filtre client-side
+#  - GET /users retorna 20 usuaris actius accessibles amb aquest token
 
 class BizneoClie:
-    """
-    Client per a la API Bizneo HCM.
-    Base URL: https://connect.bizneo.com/hcm/v1/
-    Auth: token per query param (?token=XXX)
-    """
-    BASE = "https://connect.bizneo.com/hcm/v1"
+    """Client Bizneo HCM. Cacheja les absències per evitar crides repetides."""
 
-    def __init__(self, token: str):
+    def __init__(self, token: str = BIZNEO_TOKEN, base: str = BIZNEO_BASE):
         import requests
         self.token   = token
+        self.base    = base
         self.session = requests.Session()
         self.session.headers.update({"Accept": "application/json"})
+        self._absencies_cache: list[dict] | None = None
 
-    def _get(self, endpoint: str, params: dict = None):
-        params = params or {}
-        params["token"] = self.token
-        r = self.session.get(f"{self.BASE}/{endpoint}", params=params)
+    def _get(self, endpoint: str, params: dict = None) -> dict:
+        params = {**(params or {}), "token": self.token}
+        r = self.session.get(f"{self.base}{endpoint}", params=params, timeout=30)
         r.raise_for_status()
         return r.json()
 
-    def empleats(self, pagina: int = 1, per_pagina: int = 100):
-        """Llista d'empleats actius."""
-        return self._get("users", {"page": pagina, "per_page": per_pagina})
+    def _totes_absencies(self) -> list[dict]:
+        """Descarrega totes les absències (deduplicades per id)."""
+        if self._absencies_cache is not None:
+            return self._absencies_cache
+        seen, result = set(), []
+        page = 1
+        while True:
+            data = self._get("/absences", {"page_size": 100, "page_number": page})
+            nous = [a for a in data["absences"] if a["id"] not in seen]
+            for a in nous:
+                seen.add(a["id"])
+                result.append(a)
+            # L'API repeteix dades a partir de la pàgina 2; sortim si no hi ha nous
+            if not nous or page >= data["pagination"]["total_pages"]:
+                break
+            page += 1
+        self._absencies_cache = result
+        return result
 
-    def absencies_mes(self, user_id: int, any: int, mes: int):
-        """Absències d'un empleat en un mes concret."""
-        d_from = date(any, mes, 1).isoformat()
-        _, nd  = calendar.monthrange(any, mes)
-        d_to   = date(any, mes, nd).isoformat()
-        return self._get(f"users/{user_id}/absences",
-                         {"start_date": d_from, "end_date": d_to})
+    def dies_absencia_mes(self, user_id: int, any_: int, mes: int,
+                           estats: tuple = ("approved",)) -> list[date]:
+        """
+        Retorna els dies laborables d'absència d'un usuari en un mes concret.
+        Inclou absències que solapen parcialment el mes.
+        """
+        mes_inici = date(any_, mes, 1)
+        _, nd = calendar.monthrange(any_, mes)
+        mes_fi = date(any_, mes, nd)
+
+        dies: set[date] = set()
+        for a in self._totes_absencies():
+            if a["user_id"] != user_id:
+                continue
+            if a["state"] not in estats:
+                continue
+            d_start = max(date.fromisoformat(a["start_at"]), mes_inici)
+            d_end   = min(date.fromisoformat(a["end_at"]),   mes_fi)
+            if d_start > d_end:
+                continue
+            curr = d_start
+            while curr <= d_end:
+                if curr.weekday() < 5:
+                    dies.add(curr)
+                curr += timedelta(days=1)
+        return sorted(dies)
 
 
 # ─── Generació de l'informe ───────────────────────────────────────────────────
 
-def generar_informe_agent(codi_agent: str, any: int, mes: int,
-                           trucades_reals: int,
-                           dies_absencia: list[date] = None,
-                           bizneo_token: str = None) -> dict:
+def generar_informe_agent(
+    codi_agent: str,
+    any_: int,
+    mes: int,
+    trucades_reals: int,
+    dies_absencia: list[date] = None,
+    bizneo: BizneoClie = None,
+) -> dict:
     """
     Genera l'informe complet d'un agent per a un mes.
 
-    Args:
-        codi_agent:     Codi de l'agent (ex: 'PV')
-        any, mes:       Mes a analitzar
-        trucades_reals: Trucades ateses (de l'API Adtende)
-        dies_absencia:  Llista de dates d'absència (opcional, es pot obtenir de Bizneo)
-        bizneo_token:   Token Bizneo per obtenir absències automàticament
-
-    Returns: dict amb tots els KPIs de l'informe
+    Si es passa `bizneo`, obté les absències automàticament de Bizneo.
+    Si es passa `dies_absencia`, usa aquells dies directament.
+    Si cap dels dos, assumeix assistència complerta.
     """
     agent = AGENTS.get(codi_agent)
     if not agent:
         raise ValueError(f"Agent desconegut: {codi_agent}. Opcions: {list(AGENTS)}")
 
-    # Obtenir absències de Bizneo si hi ha token
-    if bizneo_token and agent["bizneo_id"]:
-        client = BizneoClie(bizneo_token)
-        raw    = client.absencies_mes(agent["bizneo_id"], any, mes)
-        # TODO: parsejar raw per extreure dies concrets d'absència
-        # dies_absencia = _parsejar_absencies(raw)
+    # Obtenir dies d'absència
+    if dies_absencia is None:
+        dies_absencia = []
+        if bizneo and agent["bizneo_id"]:
+            dies_absencia = bizneo.dies_absencia_mes(agent["bizneo_id"], any_, mes)
 
-    # Hores i dies treballats
-    jornada = hores_mes_per_horari(codi_agent, any, mes, dies_absencia)
+    dies_absencia_set = set(dies_absencia)
+    tots_dies_lab     = dies_laborables_mes(any_, mes)
+    dies_treballats   = [d for d in tots_dies_lab if d not in dies_absencia_set]
 
-    # Mínim exigible
-    minim   = calcular_minim_proporcional(jornada["hores"], jornada["dies"])
+    minim = calcular_minim(agent["hores_setmana"], len(dies_treballats))
 
-    # Comparació
     diferencia = trucades_reals - minim["minim_exigible"]
     compliment = trucades_reals >= minim["minim_exigible"]
 
     return {
-        "agent":            codi_agent,
-        "nom":              agent["nom"],
-        "mes":              f"{any}-{mes:02d}",
-        "hores_jornada":    minim["hores_jornada"],
-        "dies_treballats":  minim["dies_treballats"],
-        "hores_actives":    minim["hores_actives"],
-        "pct_jornada":      minim["pct_jornada"],
-        "minim_exigible":   minim["minim_exigible"],
-        "trucades_reals":   trucades_reals,
-        "diferencia":       diferencia,
-        "compliment":       compliment,
+        "agent":             codi_agent,
+        "nom":               agent["nom"],
+        "mes":               f"{any_}-{mes:02d}",
+        "hores_setmana":     minim["hores_setmana"],
+        "dies_laborables":   len(tots_dies_lab),
+        "dies_absencia":     len(dies_absencia_set),
+        "dies_treballats":   minim["dies_treballats"],
+        "trucades_dia":      minim["trucades_dia"],
+        "minim_exigible":    minim["minim_exigible"],
+        "minim_ref_complet": minim["minim_ref_complet"],
+        "pct_jornada":       minim["pct_jornada"],
+        "trucades_reals":    trucades_reals,
+        "diferencia":        diferencia,
+        "compliment":        compliment,
+        "bizneo_actiu":      bizneo is not None and agent["bizneo_id"] is not None,
+        "dies_absencia_list": dies_absencia,
     }
 
 
 def imprimir_informe(inf: dict):
-    sep = "─" * 52
-    estat = "✅ COMPLERT" if inf["compliment"] else "❌ NO COMPLERT"
+    sep   = "─" * 54
+    estat = "COMPLERT" if inf["compliment"] else "NO COMPLERT"
+    flag  = "✅" if inf["compliment"] else "❌"
+    biz   = "Bizneo" if inf["bizneo_actiu"] else "Manual/sense dades"
+
     print(f"\n{sep}")
     print(f"  INFORME AGENT — {inf['nom']} ({inf['agent']}) — {inf['mes']}")
     print(f"{sep}")
-    print(f"  Hores jornada mes      : {inf['hores_jornada']}h")
-    print(f"  Dies treballats        : {inf['dies_treballats']}")
-    print(f"  Hores actives (sense descans): {inf['hores_actives']}h")
-    print(f"  % sobre jornada complerta    : {inf['pct_jornada']}%")
+    print(f"  Hores contracte/setmana  : {inf['hores_setmana']}h")
+    print(f"  Dies laborables del mes  : {inf['dies_laborables']}")
+    print(f"  Dies absència            : {inf['dies_absencia']}  [{biz}]")
+    print(f"  Dies treballats efectius : {inf['dies_treballats']}")
+    print(f"  % jornada complerta      : {inf['pct_jornada']}%")
     print(f"{sep}")
-    print(f"  Mínim exigible         : {inf['minim_exigible']} trucades")
-    print(f"  Trucades reals         : {inf['trucades_reals']} trucades")
-    print(f"  Diferència             : {inf['diferencia']:+d} trucades")
-    print(f"  Estat                  : {estat}")
+    print(f"  Trucades mínimes/dia     : {inf['trucades_dia']}")
+    print(f"  Mínim exigible mes       : {inf['minim_exigible']} trucades")
+    print(f"  Referència jornada 100%  : {inf['minim_ref_complet']} trucades")
+    print(f"{sep}")
+    print(f"  Trucades reals           : {inf['trucades_reals']} trucades")
+    print(f"  Diferència               : {inf['diferencia']:+d} trucades")
+    print(f"  Estat                    : {flag} {estat}")
     print(f"{sep}\n")
+
+    if inf["dies_absencia_list"]:
+        print(f"  Dies d'absència ({len(inf['dies_absencia_list'])}):")
+        for d in inf["dies_absencia_list"]:
+            print(f"    · {d.strftime('%d/%m/%Y (%A)')}")
+        print()
 
 
 # ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -344,13 +264,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Informe agent Adtende")
     parser.add_argument("--agent",    required=True, help="Codi agent (ex: PV, SG, AM)")
     parser.add_argument("--mes",      required=True, help="Mes (ex: 2026-05)")
-    parser.add_argument("--trucades", type=int,      help="Trucades reals (si no es passa s'obtenen de l'API)")
+    parser.add_argument("--trucades", type=int, default=0,
+                        help="Trucades reals ateses")
+    parser.add_argument("--no-bizneo", action="store_true",
+                        help="No consultar Bizneo (absències = 0)")
     args = parser.parse_args()
 
     any_m, mes_m = map(int, args.mes.split("-"))
 
-    # TODO: si no es passen trucades, obtenir-les automàticament de l'API Adtende
-    trucades = args.trucades or 0
+    biz = None if args.no_bizneo else BizneoClie()
 
-    inf = generar_informe_agent(args.agent, any_m, mes_m, trucades)
+    inf = generar_informe_agent(args.agent, any_m, mes_m, args.trucades, bizneo=biz)
     imprimir_informe(inf)
