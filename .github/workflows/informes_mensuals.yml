@@ -5,6 +5,7 @@ name: Informes Mensuals Adtende
 on:
   schedule:
     - cron: '0 7 5 * *'
+    - cron: '0 7 11 * *'
   workflow_dispatch:
     inputs:
       year:
