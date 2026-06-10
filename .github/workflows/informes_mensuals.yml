@@ -105,35 +105,53 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-      - name: Enviar informes per correu
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.office365.com
-          server_port: 587
-          secure: false
-          username: ${{ secrets.MAIL_USERNAME }}
-          password: ${{ secrets.MAIL_PASSWORD }}
-          subject: "📊 Informes Mensuals Adtende — ${{ steps.periode.outputs.label_human }}"
-          to: vjaen@adtende.es
-          from: "Adtende Reports <${{ secrets.MAIL_USERNAME }}>"
-          body: |
-            Hola Victor,
+      - name: Enviar informes per correu (Resend)
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          PERIODE: ${{ steps.periode.outputs.label_human }}
+        run: |
+          pip install resend --quiet
+          python - <<'EOF'
+          import resend, os, base64, glob
 
-            S'han generat automàticament els informes mensuals de ${{ steps.periode.outputs.label_human }}.
+          resend.api_key = os.environ["RESEND_API_KEY"]
+          periode = os.environ["PERIODE"]
 
-            Adjunts trobaràs els 5 informes Word:
-              • OAC360
-              • OAC360 Social
-              • OAC360 Tributs
-              • SATEDIBA
-              • Centraleta (SCT)
+          # Adjuntar tots els .docx generats
+          attachments = []
+          for path in sorted(glob.glob("output/*.docx")):
+              with open(path, "rb") as f:
+                  data = base64.b64encode(f.read()).decode()
+              attachments.append({
+                  "filename": os.path.basename(path),
+                  "content":  data,
+              })
 
-            Els fitxers també estan disponibles a GitHub Actions durant 90 dies:
-            https://github.com/vjaentende/adtende-extractor/actions
-
-            —
-            Generat automàticament el dia 5 del mes · Adtende Analytics
-          attachments: output/*.docx
+          r = resend.Emails.send({
+              "from":    "Adtende Reports <onboarding@resend.dev>",
+              "to":      ["vjaen@adtende.es"],
+              "subject": f"Informes Mensuals Adtende — {periode}",
+              "html": f"""
+              <p>Hola Victor,</p>
+              <p>S'han generat automàticament els informes mensuals de <strong>{periode}</strong>.</p>
+              <p>Adjunts trobaràs els 5 informes Word:</p>
+              <ul>
+                <li>OAC360</li>
+                <li>OAC360 Social</li>
+                <li>OAC360 Tributs</li>
+                <li>SATEDIBA</li>
+                <li>Centraleta (SCT)</li>
+              </ul>
+              <p>Els fitxers també estan disponibles a
+              <a href="https://github.com/vjaentende/adtende-extractor/actions">GitHub Actions</a>
+              durant 90 dies.</p>
+              <hr>
+              <small>Generat automàticament el dia 5 del mes · Adtende Analytics</small>
+              """,
+              "attachments": attachments,
+          })
+          print(f"✅ Correu enviat — ID: {r['id']}")
+          EOF
 
       - name: Resum final al log
         if: always()
