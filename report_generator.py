@@ -1182,3 +1182,256 @@ def generate_yoy_report(year1: int, month: int, year2: int,
     doc.save(str(output_path))
     print(f"Informe comparatiu generat: {output_path}")
     return str(output_path)
+
+
+def generate_quarterly_report(year: int, quarter: int, output_dir: str = "."):
+    """
+    Genera l'informe trimestral comparatiu (Q1=gen-feb-mar, Q2=abr-mai-jun, etc.)
+    per als 5 serveis. Un Word per servei: comparativa 3 mesos + totals acumulats.
+    """
+    import calendar as _cal
+
+    q_mesos = {1: [1, 2, 3], 2: [4, 5, 6], 3: [7, 8, 9], 4: [10, 11, 12]}
+    mesos_q = q_mesos[quarter]
+    noms_m = [MESOS[m] for m in mesos_q]
+    label_q = f"Q{quarter} {year} — {noms_m[0]}, {noms_m[1]}, {noms_m[2]}"
+
+    client = AdtendeClient()
+    print(f"Autenticant per informe trimestral {label_q}...")
+    client.login()
+
+    generated = date.today().strftime("%d/%m/%Y")
+    out_dir = Path(output_dir)
+    generated_files = []
+
+    for svc in SERVICES:
+        print(f"\n{'─'*55}")
+        print(f"▶ {svc['name']} — {label_q}")
+
+        # Descarrega i filtra els 3 mesos
+        dfs = {}
+        for m in mesos_q:
+            try:
+                df_raw = client.query_month(
+                    svc["endpoint"], year, m,
+                    date_field=svc["date_field"],
+                    project=svc["project"],
+                )
+                df_raw = _apply_dual_date_filter(df_raw, year, m)
+                for col in ["val_rating", "val_encuestable", "val_hours_resolution",
+                            "val_time_spent", "flg_resolution", "val_media_enc",
+                            "val_pregunta1", "val_pregunta2", "val_pregunta3"]:
+                    if col in df_raw.columns:
+                        df_raw[col] = pd.to_numeric(df_raw[col], errors="coerce")
+                dfs[m] = df_raw
+                print(f"  {MESOS[m]}: {len(df_raw)} registres")
+            except Exception as e:
+                print(f"  {MESOS[m]}: ERROR — {e}")
+                dfs[m] = pd.DataFrame()
+
+        # ── Helpers KPI per mes ─────────────────────────────────────────────
+        def _kpis_mes(df):
+            if df.empty:
+                return {"total": 0, "avg_min": None, "flg_res": None,
+                        "enc_mean": None, "n_cats": 0, "n_canals": 0}
+            total = len(df)
+            avg_min = None
+            if "val_hours_resolution" in df.columns:
+                mask = (pd.to_numeric(df.get("val_encuestable",
+                        pd.Series(1, index=df.index)), errors="coerce") == 1)
+                t = pd.to_numeric(df.loc[mask, "val_hours_resolution"],
+                                  errors="coerce").dropna()
+                if len(t): avg_min = t.mean() * 60
+            flg_res = None
+            if "flg_resolution" in df.columns:
+                res = pd.to_numeric(df["flg_resolution"], errors="coerce")
+                flg_res = round(res.sum() / len(res) * 100, 1) if len(res) else None
+            enc_mean = None
+            if "val_media_enc" in df.columns:
+                enc = pd.to_numeric(df["val_media_enc"], errors="coerce").dropna()
+                if len(enc): enc_mean = round(enc.mean(), 2)
+            n_cats   = df["des_category_0"].nunique() if "des_category_0" in df.columns else 0
+            n_canals = df["des_entry_channel"].nunique() if "des_entry_channel" in df.columns else 0
+            return {"total": total, "avg_min": avg_min, "flg_res": flg_res,
+                    "enc_mean": enc_mean, "n_cats": n_cats, "n_canals": n_canals}
+
+        def _var(v1, v2):
+            """Variació percentual de v1 a v2, o '—' si no es pot calcular."""
+            if v1 is None or v2 is None or v1 == 0:
+                return "—"
+            d = (v2 - v1) / abs(v1) * 100
+            s = "+" if d >= 0 else ""
+            return f"{s}{d:.1f}%"
+
+        k = {m: _kpis_mes(dfs[m]) for m in mesos_q}
+        m1, m2, m3 = mesos_q
+        k1, k2, k3 = k[m1], k[m2], k[m3]
+
+        # Acumulat Q
+        df_q = pd.concat([dfs[m] for m in mesos_q if not dfs[m].empty], ignore_index=True)
+        kq = _kpis_mes(df_q)
+
+        # ── Construeix Word ──────────────────────────────────────────────────
+        doc = Document()
+        for section in doc.sections:
+            section.top_margin    = Cm(2)
+            section.bottom_margin = Cm(2)
+            section.left_margin   = Cm(2.5)
+            section.right_margin  = Cm(2.5)
+
+        # Portada
+        for _ in range(6):
+            p = doc.add_paragraph()
+            p.paragraph_format.space_after = Pt(0)
+        p_title = doc.add_paragraph()
+        p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p_title.add_run("Informe Trimestral de Consultes")
+        r.font.bold = True; r.font.size = Pt(28)
+        r.font.color.rgb = C_NAVY; r.font.name = "Calibri"
+        p_per = doc.add_paragraph()
+        p_per.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r2 = p_per.add_run(label_q)
+        r2.font.size = Pt(18); r2.font.color.rgb = C_TEAL; r2.font.name = "Calibri"
+        p_serv = doc.add_paragraph()
+        p_serv.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r3 = p_serv.add_run(f"{svc['name']} · Adtende Analytics")
+        r3.font.size = Pt(12); r3.font.color.rgb = C_MUTED; r3.font.name = "Calibri"
+        _add_hrule(doc, color=_hex(C_TEAL), size=8)
+        for _ in range(8):
+            p = doc.add_paragraph()
+            p.paragraph_format.space_after = Pt(0)
+        p_gen = doc.add_paragraph()
+        p_gen.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r4 = p_gen.add_run(f"Generat el {generated}")
+        r4.font.size = Pt(9); r4.font.color.rgb = C_MUTED; r4.font.name = "Calibri"
+        doc.add_page_break()
+
+        # ── SECCIÓ 1: Resum comparatiu ───────────────────────────────────────
+        _section_title(doc, "1", f"Resum comparatiu — {label_q}")
+
+        # KPI boxes: 3 mesos + acumulat
+        _add_kpi_row(doc, [
+            (_fmt(k1["total"]), f"Total {noms_m[0]}", "#1B3A6B"),
+            (_fmt(k2["total"]), f"Total {noms_m[1]}", "#1B3A6B"),
+            (_fmt(k3["total"]), f"Total {noms_m[2]}", "#00B4A6"),
+            (_fmt(kq["total"]), f"Acumulat Q{quarter}", "#F4A620"),
+        ])
+
+        # Taula comparativa KPIs
+        rows_cmp = [
+            ["Total consultes",
+             _fmt(k1["total"]), _fmt(k2["total"]), _var(k1["total"], k2["total"]),
+             _fmt(k3["total"]), _var(k2["total"], k3["total"]),
+             _fmt(kq["total"])],
+            ["Temps resolució (min)",
+             _fmt_time(k1["avg_min"]), _fmt_time(k2["avg_min"]), _var(k1["avg_min"], k2["avg_min"]),
+             _fmt_time(k3["avg_min"]), _var(k2["avg_min"], k3["avg_min"]),
+             _fmt_time(kq["avg_min"])],
+            ["% Resolució",
+             f"{k1['flg_res']:.1f}%".replace(".", ",") if k1["flg_res"] is not None else "—",
+             f"{k2['flg_res']:.1f}%".replace(".", ",") if k2["flg_res"] is not None else "—",
+             _var(k1["flg_res"], k2["flg_res"]),
+             f"{k3['flg_res']:.1f}%".replace(".", ",") if k3["flg_res"] is not None else "—",
+             _var(k2["flg_res"], k3["flg_res"]),
+             f"{kq['flg_res']:.1f}%".replace(".", ",") if kq["flg_res"] is not None else "—"],
+            ["Valoració mitjana",
+             f"{k1['enc_mean']:.2f}".replace(".", ",") if k1["enc_mean"] else "—",
+             f"{k2['enc_mean']:.2f}".replace(".", ",") if k2["enc_mean"] else "—",
+             _var(k1["enc_mean"], k2["enc_mean"]),
+             f"{k3['enc_mean']:.2f}".replace(".", ",") if k3["enc_mean"] else "—",
+             _var(k2["enc_mean"], k3["enc_mean"]),
+             f"{kq['enc_mean']:.2f}".replace(".", ",") if kq["enc_mean"] else "—"],
+        ]
+        _add_table(doc,
+                   ["Indicador",
+                    noms_m[0], noms_m[1], f"Var {noms_m[0]}→{noms_m[1]}",
+                    noms_m[2], f"Var {noms_m[1]}→{noms_m[2]}",
+                    f"Total Q{quarter}"],
+                   rows_cmp,
+                   col_widths_cm=[4.5, 2.2, 2.2, 2.2, 2.2, 2.2, 2.2],
+                   total_row=True)
+
+        # ── SECCIÓ 2: Evolució mensual (gràfic barres) ───────────────────────
+        _section_title(doc, "2", "Evolució mensual de consultes")
+        _body_para(doc,
+            f"El trimestre acumula {_fmt(kq['total'])} consultes. "
+            f"La variació de {noms_m[0]} a {noms_m[1]} és {_var(k1['total'], k2['total'])}, "
+            f"i de {noms_m[1]} a {noms_m[2]} és {_var(k2['total'], k3['total'])}.")
+
+        # Gràfic barres 3 mesos
+        fig, ax = plt.subplots(figsize=(7, 3))
+        _mpl_style()
+        bars = ax.bar(noms_m,
+                      [k1["total"], k2["total"], k3["total"]],
+                      color=[H_NAVY, H_NAVY, H_TEAL], width=0.5)
+        for bar in bars:
+            h = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width() / 2, h + max(h * 0.02, 1),
+                    _fmt(h), ha="center", va="bottom", fontsize=9,
+                    color=H_TEXT, fontweight="bold")
+        ax.set_ylabel("Consultes", fontsize=9)
+        ax.tick_params(labelsize=9)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        plt.tight_layout(pad=0.5)
+        doc.add_picture(_buf(fig), width=Cm(14))
+        plt.close(fig)
+
+        # ── SECCIÓ 3: Detall per mes (evolució diària cada mes) ──────────────
+        _section_title(doc, "3", "Evolució diària per mes")
+        for m, nom in zip(mesos_q, noms_m):
+            df_m = dfs[m]
+            if df_m.empty:
+                _body_para(doc, f"{nom}: sense dades.")
+                continue
+            _body_para(doc, f"— {nom} {year}: {_fmt(len(df_m))} consultes", bold_parts=[f"— {nom} {year}:"])
+            chart = _chart_evolucion(df_m)  # retorna BytesIO
+            if chart:
+                doc.add_picture(chart, width=Cm(13))
+
+        # ── SECCIÓ 4: Distribució per canal (acumulat) ───────────────────────
+        if "des_entry_channel" in df_q.columns and not df_q.empty:
+            _section_title(doc, "4", "Distribució per canal d'entrada (acumulat Q)")
+            canals = df_q["des_entry_channel"].value_counts()
+            chart_c = _chart_canal(canals, kq["total"])  # retorna BytesIO
+            if chart_c:
+                doc.add_picture(chart_c, width=Cm(13))
+
+        # ── SECCIÓ 5: Categories (acumulat) ──────────────────────────────────
+        if "des_category_0" in df_q.columns and not df_q.empty:
+            _section_title(doc, "5", "Principals categories (acumulat Q)")
+            cats = df_q["des_category_0"].value_counts()
+            chart_h = _chart_hbars(cats, kq["total"], top=15)  # retorna BytesIO
+            if chart_h:
+                doc.add_picture(chart_h, width=Cm(13))
+
+        # ── SECCIÓ 6: Satisfacció ─────────────────────────────────────────────
+        if "val_rating" in df_q.columns and not df_q.empty:
+            enc_q = df_q[
+                (pd.to_numeric(df_q.get("val_encuestable",
+                 pd.Series(1, index=df_q.index)), errors="coerce") == 1) &
+                (pd.to_numeric(df_q["val_rating"], errors="coerce").notna())
+            ]
+            if len(enc_q) >= 5:
+                _section_title(doc, "6", "Satisfacció (acumulat Q)")
+                _body_para(doc,
+                    f"Valoració mitjana del trimestre: "
+                    f"{kq['enc_mean']:.2f}/5".replace(".", ",") if kq["enc_mean"] else
+                    "Sense dades de satisfacció.")
+                chart_s = _chart_satisfaccio(enc_q)  # retorna BytesIO
+                if chart_s:
+                    doc.add_picture(chart_s, width=Cm(13))
+
+        # Desa
+        slug_q = f"Q{quarter}"
+        fname = f"informe_{year}_{slug_q}_{noms_m[0]}_{noms_m[1]}_{noms_m[2]}_{svc['slug']}.docx"
+        output_path = out_dir / fname
+        doc.save(str(output_path))
+        print(f"  ✅ Generat: {output_path}")
+        generated_files.append(str(output_path))
+
+    print(f"\n{'─'*55}")
+    print(f"Trimestral {label_q} completat: {len(generated_files)}/{len(SERVICES)} informes")
+    for p in generated_files:
+        print(f"  · {p}")
+    return generated_files

@@ -672,7 +672,7 @@ def generar_html_multi_periode(municipio: str,
     min-width: {col_w_val}px;
   }}
   th.col-general {{
-    color: #777;
+    color: #444;
     background: #f9f9f9;
     min-width: {col_w_val}px;
   }}
@@ -691,7 +691,7 @@ def generar_html_multi_periode(municipio: str,
     border-bottom: 1px solid #eee;
   }}
   td.general {{
-    color: #888;
+    color: #333;
     font-weight: 400;
   }}
   .better {{ color: #00A89D; }}

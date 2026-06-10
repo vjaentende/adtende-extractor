@@ -1,0 +1,122 @@
+name: Informes Mensuals Adtende
+
+# S'executa automàticament el dia 5 de cada mes a les 7:00 (UTC) = 9:00 hora Espanya
+# també es pot llançar manualment des de la pestanya Actions de GitHub
+on:
+  schedule:
+    - cron: '0 7 5 * *'
+  workflow_dispatch:
+    inputs:
+      year:
+        description: 'Any (deixa buit = automàtic)'
+        required: false
+        default: ''
+      month:
+        description: 'Mes 1-12 (deixa buit = mes anterior)'
+        required: false
+        default: ''
+
+jobs:
+  generar-informes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout del codi
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache dependències pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Instal·lar dependències
+        run: pip install -r requirements.txt
+
+      - name: Determinar any i mes a generar
+        id: periode
+        run: |
+          python - <<'EOF'
+          import os
+          from datetime import date
+
+          year_in  = "${{ github.event.inputs.year }}"
+          month_in = "${{ github.event.inputs.month }}"
+
+          if year_in.strip() and month_in.strip():
+              year  = int(year_in)
+              month = int(month_in)
+          else:
+              today = date.today()
+              if today.month == 1:
+                  year, month = today.year - 1, 12
+              else:
+                  year, month = today.year, today.month - 1
+
+          mesos = ['Gener','Febrer','Març','Abril','Maig','Juny',
+                   'Juliol','Agost','Setembre','Octubre','Novembre','Desembre']
+          print(f"Generant informes de {mesos[month-1]} {year}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"year={year}\n")
+              f.write(f"month={month:02d}\n")
+              f.write(f"label={mesos[month-1]}-{year}\n")
+          EOF
+
+      - name: Generar els 5 informes mensuals
+        env:
+          ADTENDE_USERNAME: ${{ secrets.ADTENDE_USERNAME }}
+          ADTENDE_PASSWORD: ${{ secrets.ADTENDE_PASSWORD }}
+          MPLBACKEND: Agg
+        run: |
+          python - <<'EOF'
+          import sys, os
+          sys.path.insert(0, ".")
+
+          year  = int("${{ steps.periode.outputs.year }}")
+          month = int("${{ steps.periode.outputs.month }}")
+
+          print(f"▶ Generant informes {year}/{month:02d}...")
+          os.makedirs("output", exist_ok=True)
+
+          from report_generator import generate_all_monthly_reports
+          paths = generate_all_monthly_reports(year, month, output_dir="output")
+
+          print(f"\n✅ Generats {len(paths)} informes:")
+          for p in paths:
+              fname = os.path.basename(p)
+              size  = os.path.getsize(p) / 1024
+              print(f"  ✓ {fname}  ({size:.0f} KB)")
+          EOF
+
+      - name: Pujar informes com a artefactes
+        uses: actions/upload-artifact@v4
+        with:
+          name: Informes-${{ steps.periode.outputs.label }}
+          path: output/*.docx
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Resum final al log
+        if: always()
+        run: |
+          echo "## Informes generats" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Període:** ${{ steps.periode.outputs.label }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if ls output/*.docx 1>/dev/null 2>&1; then
+            echo "| Fitxer | Mida |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|------|" >> $GITHUB_STEP_SUMMARY
+            for f in output/*.docx; do
+              size=$(du -h "$f" | cut -f1)
+              echo "| $(basename $f) | $size |" >> $GITHUB_STEP_SUMMARY
+            done
+          else
+            echo "❌ No s'han generat fitxers" >> $GITHUB_STEP_SUMMARY
+          fi
