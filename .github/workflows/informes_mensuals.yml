@@ -108,7 +108,7 @@ jobs:
       - name: Enviar informes per correu
         uses: dawidd6/action-send-mail@v3
         with:
-          server_address: smtp.gmail.com
+          server_address: smtp.office365.com
           server_port: 587
           secure: false
           username: ${{ secrets.MAIL_USERNAME }}
