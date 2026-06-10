@@ -61,12 +61,14 @@ jobs:
 
           mesos = ['Gener','Febrer','Març','Abril','Maig','Juny',
                    'Juliol','Agost','Setembre','Octubre','Novembre','Desembre']
-          print(f"Generant informes de {mesos[month-1]} {year}")
+          label = f"{mesos[month-1]} {year}"
+          print(f"Generant informes de {label}")
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"year={year}\n")
               f.write(f"month={month:02d}\n")
               f.write(f"label={mesos[month-1]}-{year}\n")
+              f.write(f"label_human={label}\n")
           EOF
 
       - name: Generar els 5 informes mensuals
@@ -103,12 +105,43 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
+      - name: Enviar informes per correu
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          secure: false
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "📊 Informes Mensuals Adtende — ${{ steps.periode.outputs.label_human }}"
+          to: vjaen@adtende.es
+          from: "Adtende Reports <${{ secrets.MAIL_USERNAME }}>"
+          body: |
+            Hola Victor,
+
+            S'han generat automàticament els informes mensuals de ${{ steps.periode.outputs.label_human }}.
+
+            Adjunts trobaràs els 5 informes Word:
+              • OAC360
+              • OAC360 Social
+              • OAC360 Tributs
+              • SATEDIBA
+              • Centraleta (SCT)
+
+            Els fitxers també estan disponibles a GitHub Actions durant 90 dies:
+            https://github.com/vjaentende/adtende-extractor/actions
+
+            —
+            Generat automàticament el dia 5 del mes · Adtende Analytics
+          attachments: output/*.docx
+
       - name: Resum final al log
         if: always()
         run: |
-          echo "## Informes generats" >> $GITHUB_STEP_SUMMARY
+          echo "## Informes generats i enviats" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Període:** ${{ steps.periode.outputs.label }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Període:** ${{ steps.periode.outputs.label_human }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Enviat a:** vjaen@adtende.es" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           if ls output/*.docx 1>/dev/null 2>&1; then
             echo "| Fitxer | Mida |" >> $GITHUB_STEP_SUMMARY
