@@ -115,7 +115,7 @@ jobs:
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
           subject: "Informes Mensuals Adtende — ${{ steps.periode.outputs.label_human }}"
-          to: vjaen@adtende.es
+          to: vjaen@adtende.es, audina@adtende.es
           from: "Adtende Reports <${{ secrets.MAIL_USERNAME }}>"
           body: |
             Hola Victor,
