@@ -164,6 +164,15 @@ jobs:
               print(f"  ✓ {fname}  ({size:.0f} KB)")
           EOF
 
+      - name: Empaquetar informes en ZIPs per tipus
+        run: |
+          mkdir -p zips
+          cd output
+          ls *.docx | grep -v '_Q[0-9]_\|_S[12]_' | zip -j ../zips/Mensuals-${{ steps.periode.outputs.label }}.zip -@ || true
+          ls *.docx | grep '_Q[0-9]_'              | zip -j ../zips/Trimestrals-${{ steps.periode.outputs.label }}.zip -@ || true
+          ls *.docx | grep '_S[12]_'               | zip -j ../zips/Semestrals-${{ steps.periode.outputs.label }}.zip -@ || true
+          cd .. && ls -lh zips/
+
       - name: Pujar informes com a artefactes
         uses: actions/upload-artifact@v4.6.2
         with:
@@ -188,13 +197,14 @@ jobs:
 
             S'han generat automàticament els informes de ${{ steps.periode.outputs.label_human }}.
 
-            Adjunts trobaràs els 5 informes mensuals (OAC360, Social, Tributs, SATEDIBA, Centraleta)${{ steps.periode.outputs.es_trimestre == 'true' && format(' + 5 informes trimestrals Q{0}', steps.periode.outputs.quarter) || '' }}${{ steps.periode.outputs.es_semestral == 'true' && format(' + 5 informes semestrals S{0}', steps.periode.outputs.semester) || '' }}.
+            Adjunts trobaràs 3 ZIPs:
+              📁 Mensuals-${{ steps.periode.outputs.label }}.zip — 5 informes mensuals (OAC360, Social, Tributs, SATEDIBA, Centraleta)${{ steps.periode.outputs.es_trimestre == 'true' && format('\n  📁 Trimestrals-{0}.zip — 5 informes trimestrals Q{1}', steps.periode.outputs.label, steps.periode.outputs.quarter) || '' }}${{ steps.periode.outputs.es_semestral == 'true' && format('\n  📁 Semestrals-{0}.zip — 5 informes semestrals S{1}', steps.periode.outputs.label, steps.periode.outputs.semester) || '' }}
 
             Els fitxers també estan disponibles a GitHub Actions durant 90 dies:
             https://github.com/vjaentende/adtende-extractor/actions
 
             Adtende Analytics
-          attachments: output/*.docx
+          attachments: zips/*.zip
 
       - name: Resum final al log
         if: always()
