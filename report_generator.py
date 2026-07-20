@@ -331,13 +331,31 @@ def _chart_evolucion(df):
     return _buf(fig)
 
 def _chart_heatmap(df):
-    if "td_created" not in df.columns or "th_created" not in df.columns:
+    if "td_created" not in df.columns:
         return None
     _mpl_style()
     d = df.copy()
-    d["td_created"] = pd.to_datetime(d["td_created"], errors="coerce")
-    d["dia"] = d["td_created"].dt.dayofweek
-    d["hora"] = pd.to_datetime(d["th_created"], format="%H:%M:%S", errors="coerce").dt.hour
+    # Usar els 10 primers caràcters de td_created (YYYY-MM-DD) per evitar NaT amb timestamps
+    d["_dt"] = pd.to_datetime(d["td_created"].astype(str).str[:10], format="%Y-%m-%d", errors="coerce")
+    d["dia"] = d["_dt"].dt.dayofweek
+    # Extreure hora: provar th_created en múltiples formats, fallback al timestamp de td_created
+    if "th_created" in d.columns:
+        th = d["th_created"].astype(str).str.strip()
+        hora = pd.to_datetime(th, format="%H:%M:%S", errors="coerce").dt.hour
+        null_mask = hora.isna()
+        if null_mask.any():
+            hora[null_mask] = pd.to_datetime(th[null_mask], format="%H:%M", errors="coerce").dt.hour
+        null_mask2 = hora.isna()
+        if null_mask2.any():
+            hora[null_mask2] = pd.to_numeric(th[null_mask2].str[:2], errors="coerce")
+        d["hora"] = hora
+    else:
+        d["hora"] = d["_dt"].dt.hour
+    d = d.dropna(subset=["dia", "hora"])
+    if d.empty:
+        return None
+    d["dia"]  = d["dia"].astype(int)
+    d["hora"] = d["hora"].astype(int).clip(0, 23)
     pivot = d.groupby(["dia", "hora"]).size().unstack(fill_value=0)\
              .reindex(index=range(7), columns=range(24), fill_value=0)
     fig, ax = plt.subplots(figsize=(12, 3.6))
@@ -796,8 +814,8 @@ def _build_docx(df, year, month, periode_label, output_path):
 
     if "td_created" in df.columns:
         df2 = df.copy()
-        df2["td_created"] = pd.to_datetime(df2["td_created"], errors="coerce")
-        df2["dia_num"] = df2["td_created"].dt.dayofweek
+        df2["_dt2"] = pd.to_datetime(df2["td_created"].astype(str).str[:10], format="%Y-%m-%d", errors="coerce")
+        df2["dia_num"] = df2["_dt2"].dt.dayofweek
         per_dia = df2.groupby("dia_num").size().reindex(range(7), fill_value=0)
         rows_dia = [[DIES[i], _fmt(v), f"{_pct(v, total)}%"] for i, v in per_dia.items()]
         rows_dia.append(["TOTAL", _fmt(total), "100%"])
