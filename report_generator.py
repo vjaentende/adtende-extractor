@@ -1453,3 +1453,251 @@ def generate_quarterly_report(year: int, quarter: int, output_dir: str = "."):
     for p in generated_files:
         print(f"  · {p}")
     return generated_files
+
+
+def generate_semiannual_report(year: int, semester: int, output_dir: str = "."):
+    """
+    Genera l'informe semestral comparatiu (S1=gen-jun, S2=jul-des)
+    per als 5 serveis. Un Word per servei: comparativa Q vs Q + totals acumulats.
+    """
+    import calendar as _cal
+
+    s_mesos = {1: [1, 2, 3, 4, 5, 6], 2: [7, 8, 9, 10, 11, 12]}
+    s_quarters = {1: (1, 2), 2: (3, 4)}
+    mesos_s = s_mesos[semester]
+    q1_s, q2_s = s_quarters[semester]
+    noms_m = [MESOS[m] for m in mesos_s]
+    label_s = f"S{semester} {year} — {noms_m[0]}–{noms_m[5]}"
+
+    client = AdtendeClient()
+    print(f"Autenticant per informe semestral {label_s}...")
+    client.login()
+
+    generated = date.today().strftime("%d/%m/%Y")
+    out_dir = Path(output_dir)
+    generated_files = []
+
+    for svc in SERVICES:
+        print(f"\n{'─'*55}")
+        print(f"▶ {svc['name']} — {label_s}")
+
+        # Descarrega i filtra els 6 mesos
+        dfs = {}
+        for m in mesos_s:
+            try:
+                df_raw = client.query_month(
+                    svc["endpoint"], year, m,
+                    date_field=svc["date_field"],
+                    project=svc["project"],
+                )
+                df_raw = _apply_dual_date_filter(df_raw, year, m)
+                for col in ["val_rating", "val_encuestable", "val_hours_resolution",
+                            "val_time_spent", "flg_resolution", "val_media_enc",
+                            "val_pregunta1", "val_pregunta2", "val_pregunta3"]:
+                    if col in df_raw.columns:
+                        df_raw[col] = pd.to_numeric(df_raw[col], errors="coerce")
+                dfs[m] = df_raw
+                print(f"  {MESOS[m]}: {len(df_raw)} registres")
+            except Exception as e:
+                print(f"  {MESOS[m]}: ERROR — {e}")
+                dfs[m] = pd.DataFrame()
+
+        def _kpis_mes(df):
+            if df.empty:
+                return {"total": 0, "avg_min": None, "flg_res": None,
+                        "enc_mean": None}
+            total = len(df)
+            avg_min = None
+            if "val_hours_resolution" in df.columns:
+                mask = (pd.to_numeric(df.get("val_encuestable",
+                        pd.Series(1, index=df.index)), errors="coerce") == 1)
+                t = pd.to_numeric(df.loc[mask, "val_hours_resolution"],
+                                  errors="coerce").dropna()
+                if len(t): avg_min = t.mean() * 60
+            flg_res = None
+            if "flg_resolution" in df.columns:
+                res = pd.to_numeric(df["flg_resolution"], errors="coerce")
+                flg_res = round(res.sum() / len(res) * 100, 1) if len(res) else None
+            enc_mean = None
+            if "val_media_enc" in df.columns:
+                enc = pd.to_numeric(df["val_media_enc"], errors="coerce").dropna()
+                if len(enc): enc_mean = round(enc.mean(), 2)
+            return {"total": total, "avg_min": avg_min, "flg_res": flg_res,
+                    "enc_mean": enc_mean}
+
+        def _var(v1, v2):
+            if v1 is None or v2 is None or v1 == 0:
+                return "—"
+            d = (v2 - v1) / abs(v1) * 100
+            s = "+" if d >= 0 else ""
+            return f"{s}{d:.1f}%"
+
+        k = {m: _kpis_mes(dfs[m]) for m in mesos_s}
+
+        # Acumulats per quarter i semestre
+        q1_mesos = mesos_s[:3]
+        q2_mesos = mesos_s[3:]
+        df_q1 = pd.concat([dfs[m] for m in q1_mesos if not dfs[m].empty], ignore_index=True)
+        df_q2 = pd.concat([dfs[m] for m in q2_mesos if not dfs[m].empty], ignore_index=True)
+        df_s  = pd.concat([df_q1, df_q2], ignore_index=True)
+        kq1   = _kpis_mes(df_q1)
+        kq2   = _kpis_mes(df_q2)
+        ks    = _kpis_mes(df_s)
+
+        # ── Construeix Word ──────────────────────────────────────────────────
+        doc = Document()
+        for section in doc.sections:
+            section.top_margin    = Cm(2)
+            section.bottom_margin = Cm(2)
+            section.left_margin   = Cm(2.5)
+            section.right_margin  = Cm(2.5)
+
+        # Portada
+        for _ in range(6):
+            p = doc.add_paragraph()
+            p.paragraph_format.space_after = Pt(0)
+        p_title = doc.add_paragraph()
+        p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p_title.add_run("Informe Semestral de Consultes")
+        r.font.bold = True; r.font.size = Pt(28)
+        r.font.color.rgb = C_NAVY; r.font.name = "Calibri"
+        p_per = doc.add_paragraph()
+        p_per.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r2 = p_per.add_run(label_s)
+        r2.font.size = Pt(18); r2.font.color.rgb = C_TEAL; r2.font.name = "Calibri"
+        p_serv = doc.add_paragraph()
+        p_serv.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r3 = p_serv.add_run(f"{svc['name']} · Adtende Analytics")
+        r3.font.size = Pt(12); r3.font.color.rgb = C_MUTED; r3.font.name = "Calibri"
+        _add_hrule(doc, color=_hex(C_TEAL), size=8)
+        for _ in range(8):
+            p = doc.add_paragraph()
+            p.paragraph_format.space_after = Pt(0)
+        p_gen = doc.add_paragraph()
+        p_gen.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r4 = p_gen.add_run(f"Generat el {generated}")
+        r4.font.size = Pt(9); r4.font.color.rgb = C_MUTED; r4.font.name = "Calibri"
+        doc.add_page_break()
+
+        # ── SECCIÓ 1: Resum comparatiu Q vs Q ───────────────────────────────
+        _section_title(doc, "1", f"Resum comparatiu — Q{q1_s} vs Q{q2_s} ({year})")
+
+        _add_kpi_row(doc, [
+            (_fmt(kq1["total"]), f"Total Q{q1_s}", "#1B3A6B"),
+            (_fmt(kq2["total"]), f"Total Q{q2_s}", "#1B3A6B"),
+            (_fmt(ks["total"]),  f"Acumulat S{semester}", "#F4A620"),
+            (_var(kq1["total"], kq2["total"]), f"Var Q{q1_s}→Q{q2_s}", "#00B4A6"),
+        ])
+
+        rows_cmp = [
+            ["Total consultes",
+             _fmt(kq1["total"]), _fmt(kq2["total"]),
+             _var(kq1["total"], kq2["total"]), _fmt(ks["total"])],
+            ["Temps resolució (min)",
+             _fmt_time(kq1["avg_min"]), _fmt_time(kq2["avg_min"]),
+             _var(kq1["avg_min"], kq2["avg_min"]), _fmt_time(ks["avg_min"])],
+            ["% Resolució",
+             f"{kq1['flg_res']:.1f}%".replace(".", ",") if kq1["flg_res"] is not None else "—",
+             f"{kq2['flg_res']:.1f}%".replace(".", ",") if kq2["flg_res"] is not None else "—",
+             _var(kq1["flg_res"], kq2["flg_res"]),
+             f"{ks['flg_res']:.1f}%".replace(".", ",") if ks["flg_res"] is not None else "—"],
+            ["Valoració mitjana",
+             f"{kq1['enc_mean']:.2f}".replace(".", ",") if kq1["enc_mean"] else "—",
+             f"{kq2['enc_mean']:.2f}".replace(".", ",") if kq2["enc_mean"] else "—",
+             _var(kq1["enc_mean"], kq2["enc_mean"]),
+             f"{ks['enc_mean']:.2f}".replace(".", ",") if ks["enc_mean"] else "—"],
+        ]
+        _add_table(doc,
+                   ["Indicador", f"Q{q1_s}", f"Q{q2_s}",
+                    f"Var Q{q1_s}→Q{q2_s}", f"Total S{semester}"],
+                   rows_cmp,
+                   col_widths_cm=[5.5, 3.0, 3.0, 3.0, 3.0],
+                   total_row=True)
+
+        # ── SECCIÓ 2: Evolució mensual (6 barres) ───────────────────────────
+        _section_title(doc, "2", "Evolució mensual de consultes")
+        totals_m = [k[m]["total"] for m in mesos_s]
+        _body_para(doc,
+            f"El semestre acumula {_fmt(ks['total'])} consultes. "
+            f"Q{q1_s}: {_fmt(kq1['total'])} · Q{q2_s}: {_fmt(kq2['total'])} "
+            f"({_var(kq1['total'], kq2['total'])}).")
+
+        fig, ax = plt.subplots(figsize=(10, 3.5))
+        _mpl_style()
+        colors_bars = [H_NAVY] * 3 + [H_TEAL] * 3
+        bars = ax.bar(noms_m, totals_m, color=colors_bars, width=0.6)
+        for bar in bars:
+            h = bar.get_height()
+            if h > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2, h + max(h * 0.02, 1),
+                        _fmt(h), ha="center", va="bottom", fontsize=8,
+                        color=H_TEXT, fontweight="bold")
+        ax.set_ylabel("Consultes", fontsize=9)
+        ax.tick_params(labelsize=8)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        from matplotlib.patches import Patch
+        ax.legend(handles=[Patch(color=H_NAVY, label=f"Q{q1_s}"),
+                            Patch(color=H_TEAL, label=f"Q{q2_s}")],
+                  fontsize=8, frameon=False)
+        plt.tight_layout(pad=0.5)
+        doc.add_picture(_buf(fig), width=Cm(15))
+        plt.close(fig)
+
+        # ── SECCIÓ 3: Evolució diària per mes ───────────────────────────────
+        _section_title(doc, "3", "Evolució diària per mes")
+        for m, nom in zip(mesos_s, noms_m):
+            df_m = dfs[m]
+            if df_m.empty:
+                _body_para(doc, f"{nom}: sense dades.")
+                continue
+            _body_para(doc, f"— {nom} {year}: {_fmt(len(df_m))} consultes", bold_parts=[f"— {nom} {year}:"])
+            chart = _chart_evolucion(df_m)
+            if chart:
+                doc.add_picture(chart, width=Cm(13))
+
+        # ── SECCIÓ 4: Distribució per canal (acumulat semestre) ──────────────
+        if "des_entry_channel" in df_s.columns and not df_s.empty:
+            _section_title(doc, "4", f"Distribució per canal d'entrada (acumulat S{semester})")
+            canals = df_s["des_entry_channel"].value_counts()
+            chart_c = _chart_canal(canals, ks["total"])
+            if chart_c:
+                doc.add_picture(chart_c, width=Cm(13))
+
+        # ── SECCIÓ 5: Categories (acumulat semestre) ──────────────────────────
+        if "des_category_0" in df_s.columns and not df_s.empty:
+            _section_title(doc, "5", f"Principals categories (acumulat S{semester})")
+            cats = df_s["des_category_0"].value_counts()
+            chart_h = _chart_hbars(cats, ks["total"], top=15)
+            if chart_h:
+                doc.add_picture(chart_h, width=Cm(13))
+
+        # ── SECCIÓ 6: Satisfacció (acumulat semestre) ─────────────────────────
+        if "val_rating" in df_s.columns and not df_s.empty:
+            enc_s = df_s[
+                (pd.to_numeric(df_s.get("val_encuestable",
+                 pd.Series(1, index=df_s.index)), errors="coerce") == 1) &
+                (pd.to_numeric(df_s["val_rating"], errors="coerce").notna())
+            ]
+            if len(enc_s) >= 5:
+                _section_title(doc, "6", f"Satisfacció (acumulat S{semester})")
+                _body_para(doc,
+                    f"Valoració mitjana del semestre: "
+                    f"{ks['enc_mean']:.2f}/5".replace(".", ",") if ks["enc_mean"] else
+                    "Sense dades de satisfacció.")
+                chart_s = _chart_satisfaccio(enc_s)
+                if chart_s:
+                    doc.add_picture(chart_s, width=Cm(13))
+
+        # Desa
+        fname = f"informe_{year}_S{semester}_{noms_m[0]}_{noms_m[5]}_{svc['slug']}.docx"
+        output_path = out_dir / fname
+        doc.save(str(output_path))
+        print(f"  ✅ Generat: {output_path}")
+        generated_files.append(str(output_path))
+
+    print(f"\n{'─'*55}")
+    print(f"Semestral {label_s} completat: {len(generated_files)}/{len(SERVICES)} informes")
+    for p in generated_files:
+        print(f"  · {p}")
+    return generated_files

@@ -68,7 +68,14 @@ jobs:
           quarter      = month // 3 if month % 3 == 0 else 0
           es_trimestre = "true" if quarter > 0 else "false"
 
-          print(f"Generant informes de {label}" + (f" + Q{quarter}" if quarter else ""))
+          # Semestral: mes 6=S1, mes 12=S2
+          semester     = 1 if month == 6 else (2 if month == 12 else 0)
+          es_semestral = "true" if semester > 0 else "false"
+
+          extras = []
+          if quarter:      extras.append(f"Q{quarter}")
+          if semester:     extras.append(f"S{semester}")
+          print(f"Generant informes de {label}" + (f" + {' + '.join(extras)}" if extras else ""))
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"year={year}\n")
@@ -77,6 +84,8 @@ jobs:
               f.write(f"label_human={label}\n")
               f.write(f"quarter={quarter}\n")
               f.write(f"es_trimestre={es_trimestre}\n")
+              f.write(f"semester={semester}\n")
+              f.write(f"es_semestral={es_semestral}\n")
           EOF
 
       - name: Generar els 5 informes mensuals
@@ -130,6 +139,31 @@ jobs:
               print(f"  ✓ {fname}  ({size:.0f} KB)")
           EOF
 
+      - name: Generar informe semestral (si escau)
+        if: steps.periode.outputs.es_semestral == 'true'
+        env:
+          ADTENDE_USERNAME: ${{ secrets.ADTENDE_USERNAME }}
+          ADTENDE_PASSWORD: ${{ secrets.ADTENDE_PASSWORD }}
+          MPLBACKEND: Agg
+        run: |
+          python - <<'EOF'
+          import sys, os
+          sys.path.insert(0, ".")
+
+          year     = int("${{ steps.periode.outputs.year }}")
+          semester = int("${{ steps.periode.outputs.semester }}")
+
+          print(f"▶ Generant informe semestral S{semester} {year}...")
+          from report_generator import generate_semiannual_report
+          paths = generate_semiannual_report(year, semester, output_dir="output")
+
+          print(f"\n✅ Generats {len(paths)} informes semestrals:")
+          for p in paths:
+              fname = os.path.basename(p)
+              size  = os.path.getsize(p) / 1024
+              print(f"  ✓ {fname}  ({size:.0f} KB)")
+          EOF
+
       - name: Pujar informes com a artefactes
         uses: actions/upload-artifact@v4.6.2
         with:
@@ -146,7 +180,7 @@ jobs:
           secure: false
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
-          subject: "Informes Adtende — ${{ steps.periode.outputs.label_human }}${{ steps.periode.outputs.es_trimestre == 'true' && format(' + Q{0}', steps.periode.outputs.quarter) || '' }}"
+          subject: "Informes Adtende — ${{ steps.periode.outputs.label_human }}${{ steps.periode.outputs.es_trimestre == 'true' && format(' + Q{0}', steps.periode.outputs.quarter) || '' }}${{ steps.periode.outputs.es_semestral == 'true' && format(' + S{0}', steps.periode.outputs.semester) || '' }}"
           to: vjaen@adtende.es
           from: "Adtende Reports <${{ secrets.MAIL_USERNAME }}>"
           body: |
@@ -154,7 +188,7 @@ jobs:
 
             S'han generat automàticament els informes de ${{ steps.periode.outputs.label_human }}.
 
-            Adjunts trobaràs els 5 informes mensuals (OAC360, Social, Tributs, SATEDIBA, Centraleta)${{ steps.periode.outputs.es_trimestre == 'true' && format(' i els 5 informes trimestrals comparatius del Q{0}', steps.periode.outputs.quarter) || '' }}.
+            Adjunts trobaràs els 5 informes mensuals (OAC360, Social, Tributs, SATEDIBA, Centraleta)${{ steps.periode.outputs.es_trimestre == 'true' && format(' + 5 informes trimestrals Q{0}', steps.periode.outputs.quarter) || '' }}${{ steps.periode.outputs.es_semestral == 'true' && format(' + 5 informes semestrals S{0}', steps.periode.outputs.semester) || '' }}.
 
             Els fitxers també estan disponibles a GitHub Actions durant 90 dies:
             https://github.com/vjaentende/adtende-extractor/actions
