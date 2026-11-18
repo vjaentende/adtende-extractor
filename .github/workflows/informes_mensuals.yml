@@ -190,10 +190,10 @@ jobs:
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
           subject: "Informes Adtende — ${{ steps.periode.outputs.label_human }}${{ steps.periode.outputs.es_trimestre == 'true' && format(' + Q{0}', steps.periode.outputs.quarter) || '' }}${{ steps.periode.outputs.es_semestral == 'true' && format(' + S{0}', steps.periode.outputs.semester) || '' }}"
-          to: vjaen@adtende.es
+          to: vjaen@adtende.es, audina@adtende.es
           from: "Adtende Reports <${{ secrets.MAIL_USERNAME }}>"
           body: |
-            Hola Victor,
+            Hola,
 
             S'han generat automàticament els informes de ${{ steps.periode.outputs.label_human }}.
 

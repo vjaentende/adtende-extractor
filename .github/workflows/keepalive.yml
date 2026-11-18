@@ -1,0 +1,36 @@
+name: Keepalive
+
+# Evita que GitHub desactivi els schedules per inactivitat.
+# GitHub apaga els workflows programats quan el repo passa 60 dies sense cap
+# commit. Aquest job s'executa cada setmana i, si falten pocs dies per al límit,
+# fa un commit buit que reinicia el rellotge. Així "Informes Mensuals" no es
+# torna a desactivar mai.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # cada dilluns a les 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Commit buit si ens acostem al límit d'inactivitat
+        run: |
+          git config user.name "keepalive-bot"
+          git config user.email "actions@github.com"
+          LAST=$(git log -1 --format=%ct)
+          NOW=$(date +%s)
+          DAYS=$(( (NOW - LAST) / 86400 ))
+          echo "Dies des de l'últim commit: $DAYS"
+          if [ "$DAYS" -ge 45 ]; then
+            git commit --allow-empty -m "chore: keepalive — reactiva els schedules [skip ci]"
+            git push
+            echo "Commit de keepalive fet."
+          else
+            echo "Encara lluny del límit (< 45 dies), no cal fer res."
+          fi
